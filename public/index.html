@@ -1,1 +1,123 @@
-<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TradeBot Pro — Demo</title><style>body{font-family:system-ui;background:#0c1220;color:#eef2ff;margin:0}main{max-width:850px;margin:auto;padding:28px 18px}h1{margin-bottom:4px}small{color:#94a3b8}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin:24px 0}.card{background:#172238;padding:20px;border-radius:14px;border:1px solid #2b3b56}.label{color:#9aabc6;font-size:13px}.value{font-size:24px;font-weight:700;margin-top:8px}button{background:#4776f5;color:white;border:0;padding:13px 20px;border-radius:9px;font-weight:700;cursor:pointer}button:disabled{opacity:.45}pre{white-space:pre-wrap;word-break:break-word;color:#bed0ec}.warning{border-left:4px solid #e6ae46;padding:12px;background:#292538}</style></head><body><main><h1>TradeBot Pro</h1><small>Ambiente demonstrativo • Versão 0.1</small><p class="warning">Proteção ativa: somente contas virtuais. O bot ainda não executa contratos.</p><div class="grid"><div class="card"><div class="label">Conta</div><div class="value" id="connection">—</div></div><div class="card"><div class="label">Saldo virtual</div><div class="value" id="balance">—</div></div><div class="card"><div class="label">Execução</div><div class="value">Bloqueada</div></div></div><button onclick="connect()">Conectar conta demo</button><h2>Estado do sistema</h2><pre id="message">Carregando...</pre><h2>Próximos módulos</h2><p>Gráficos, indicadores EMA/RSI, backtest, simulação e controles de risco.</p></main><script>async function refresh(){try{const r=await fetch('/api/status');const s=await r.json();document.getElementById('connection').textContent=s.connected?'Conectada':'Desconectada';document.getElementById('balance').textContent=s.balance===null?'—':`${s.balance} ${s.currency}`;document.getElementById('message').textContent=s.message+(s.configured?'':'\nConfigure as variáveis de ambiente no servidor.')}catch(e){document.getElementById('message').textContent=String(e)}}async function connect(){const r=await fetch('/api/connect',{method:'POST'});const d=await r.json();if(!r.ok)alert(d.error);refresh()}refresh();setInterval(refresh,10000)</script></body></html>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TradeBot Pro — Demo</title>
+  <style>
+    body{font-family:system-ui;background:#0c1220;color:#eef2ff;margin:0}
+    main{max-width:850px;margin:auto;padding:28px 18px}
+    h1{margin-bottom:4px} small,.label{color:#a6b6cf} small{display:block}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:14px;margin:24px 0}
+    .card{background:#172238;padding:20px;border-radius:14px;border:1px solid #2b3b56}
+    .value{font-size:22px;font-weight:700;margin-top:8px}
+    .actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .actions form{margin:0}
+    button,.button{background:#4776f5;color:white;border:0;padding:12px 17px;border-radius:9px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none}
+    button:disabled{opacity:.5;cursor:wait}
+    .warning{border-left:4px solid #e6ae46;padding:12px;background:#292538}
+    .table-wrap{overflow-x:auto} table{width:100%;border-collapse:collapse;text-align:left}
+    th,td{padding:8px;border-bottom:1px solid #2b3b56;white-space:nowrap}
+  </style>
+</head>
+<body>
+<main>
+  <h1>TradeBot Pro</h1>
+  <p class="warning">Execução bloqueada. O painel só conecta contas demo e nenhuma ordem é enviada à Deriv.</p>
+  <div class="grid">
+    <div class="card"><div class="label">Conta Deriv</div><div class="value" id="connection">—</div></div>
+    <div class="card"><div class="label">Saldo demo no login</div><div class="value" id="balance">—</div></div>
+  </div>
+  <div class="actions">
+    <a class="button" id="login" href="/auth/login" hidden>Conectar conta demo</a>
+    <form method="post" action="/auth/logout" id="logout" hidden><button>Sair</button></form>
+  </div>
+  <p id="account-message" role="status"></p>
+
+  <h2>Simulação histórica</h2>
+  <p>Volatility 100 (1s), velas de 1 minuto. A direção segue a variação entre os dois últimos fechamentos. A operação entra na abertura da vela seguinte e termina no fechamento.</p>
+  <p>Saldo inicial de 100 créditos. Cada operação vale 1 crédito. Ganho de 0,80 crédito, perda de 1 crédito e empate sem alteração. Pagamento hipotético.</p>
+  <button type="button" id="simulate">Rodar simulação</button>
+  <p id="simulation-message" role="status"></p>
+  <section id="results" aria-label="Resultados da simulação" hidden>
+    <div class="grid">
+      <div class="card"><div class="label">Saldo simulado</div><div class="value" id="sim-balance">—</div></div>
+      <div class="card"><div class="label">Resultado líquido</div><div class="value" id="sim-net">—</div></div>
+      <div class="card"><div class="label">Operações simuladas</div><div class="value" id="sim-count">—</div></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th scope="col">Hora de entrada</th><th scope="col">Direção</th><th scope="col">Entrada</th><th scope="col">Saída</th><th scope="col">Resultado</th></tr></thead>
+        <tbody id="trades"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+  const byId = id => document.getElementById(id);
+  const credits = new Intl.NumberFormat('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const quote = new Intl.NumberFormat('pt-BR', {maximumFractionDigits: 8});
+  const date = new Intl.DateTimeFormat('pt-BR', {dateStyle: 'short', timeStyle: 'short'});
+  const url = new URL(window.location.href);
+  const loginStatus = url.searchParams.get('login');
+  if (loginStatus) {
+    url.searchParams.delete('login');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+  }
+  const loginMessages = new Map([
+    ['config', 'O identificador OAuth da Deriv ainda precisa ser configurado.'],
+    ['busy', 'Muitas conexões ativas. Tente novamente em instantes.'],
+    ['expired', 'A solicitação de login expirou. Inicie uma nova conexão.'],
+    ['cancelled', 'O login foi cancelado.'],
+    ['no-demo', 'Esta sessão da Deriv não tem uma conta demo ativa.'],
+    ['unavailable', 'Não foi possível concluir a conexão com a Deriv. Tente novamente.'],
+  ]);
+
+  async function refreshAccount() {
+    try {
+      const response = await fetch('/api/status');
+      if (!response.ok) throw new Error();
+      const status = await response.json();
+      byId('connection').textContent = status.connected ? 'Demo conectada' : 'Desconectada';
+      byId('balance').textContent = status.balance === null ? '—' : credits.format(status.balance) + ' ' + status.currency;
+      byId('login').hidden = status.connected || !status.configured;
+      byId('logout').hidden = !status.connected;
+      byId('account-message').textContent = loginMessages.get(loginStatus) ||
+        (status.configured ? status.message : loginMessages.get('config'));
+    } catch {
+      byId('account-message').textContent = 'Estado da conta indisponível.';
+    }
+  }
+
+  byId('simulate').addEventListener('click', async () => {
+    byId('simulate').disabled = true;
+    byId('results').hidden = true;
+    byId('simulation-message').textContent = 'Consultando o histórico da Deriv…';
+    try {
+      const response = await fetch('/api/simulate', {method: 'POST'});
+      if (!response.ok) throw new Error();
+      const result = await response.json();
+      byId('sim-balance').textContent = credits.format(result.balance);
+      byId('sim-net').textContent = credits.format(result.result);
+      byId('sim-count').textContent = result.trades.length;
+      byId('trades').replaceChildren(...result.trades.slice().reverse().map(trade => {
+        const row = document.createElement('tr');
+        for (const value of [date.format(trade.epoch * 1000), trade.direction, quote.format(trade.entry), quote.format(trade.exit), credits.format(trade.result)]) {
+          row.insertCell().textContent = value;
+        }
+        return row;
+      }));
+      byId('simulation-message').textContent = result.trades.length ? 'Simulação concluída.' : 'Sem sinais no intervalo analisado.';
+      byId('results').hidden = false;
+    } catch {
+      byId('simulation-message').textContent = 'O histórico da Deriv está indisponível. Tente novamente em instantes.';
+    } finally {
+      byId('simulate').disabled = false;
+    }
+  });
+
+  refreshAccount();
+  setInterval(refreshAccount, 60_000);
+</script>
+</body>
+</html>
