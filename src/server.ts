@@ -56,11 +56,24 @@ async function fetchJson(fetcher: typeof fetch, url: string, options: RequestIni
   return response.json();
 }
 
-function findDemoAccount(data: unknown) {
-  if (!Array.isArray(data)) return;
-  return data.find(account => account?.account_type === 'demo' &&
-    account.status === 'active' && Number.isFinite(account.balance) &&
-    typeof account.currency === 'string' && /^[A-Z]{3,6}$/.test(account.currency));
+type DemoLookup =
+  | { account: { balance: number; currency: string } }
+  | { error: 'account-response' | 'no-demo' | 'demo-inactive' | 'demo-balance' };
+
+function findDemoAccount(data: unknown): DemoLookup {
+  if (!Array.isArray(data)) return { error: 'account-response' };
+  const demoAccounts = data.filter(account => account?.account_type === 'demo');
+  const activeAccounts = demoAccounts.filter(account => account.status === 'active');
+  for (const { balance, currency } of activeAccounts) {
+    const amount = typeof balance === 'string' && /^-?\d+(?:\.\d+)?$/.test(balance)
+      ? Number(balance) : balance;
+    if (Number.isFinite(amount) && typeof currency === 'string' && /^[A-Z]{3,6}$/.test(currency)) {
+      return { account: { balance: amount, currency } };
+    }
+  }
+  if (activeAccounts.length) return { error: 'demo-balance' };
+  if (demoAccounts.length) return { error: 'demo-inactive' };
+  return { error: 'no-demo' };
 }
 
 export function readCandles(symbol: string): Promise<Candle[]> {
@@ -211,8 +224,9 @@ export function createApp({
       const result = await fetchJson(fetcher, ACCOUNTS_URL, {
         headers: { Authorization: 'Bearer ' + token.access_token, 'Deriv-App-ID': appId },
       });
-      const demo = findDemoAccount(result?.data);
-      if (!demo) return res.redirect(303, '/?login=no-demo');
+      const lookup = findDemoAccount(result?.data);
+      if ('error' in lookup) return res.redirect(303, '/?login=' + lookup.error);
+      const demo = lookup.account;
 
       prune(accounts);
       if (accounts.size >= 500) return res.redirect(303, '/?login=busy');
