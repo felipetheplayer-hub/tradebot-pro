@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const app = express();
 app.use(express.json());
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../');
-app.use(express.static(path.join(root, 'public')));
+app.use(express.static(path.resolve(process.cwd(), 'public')));
 const PORT = Number(process.env.PORT || 3000);
 const enabled = process.env.ENABLE_DEMO_TRADING === 'true';
 const appId = process.env.DERIV_APP_ID || '';
