@@ -4,6 +4,10 @@ import express, { type Request, type Response } from 'express';
 import WebSocket from 'ws';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { openDemoBroker, type Broker } from './demo-broker.js';
+import { DemoStore } from './demo-store.js';
+import { DemoEngine, validateLimits } from './demo-engine.js';
+import { createBridge, validBridgeKey } from './bridge.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.RENDER === 'true' ? '0.0.0.0' : '127.0.0.1';
@@ -18,7 +22,7 @@ const GRANULARITY = 60;
 const SESSION_COOKIE = '__Host-tradebot_session';
 const LOGIN_COOKIE = '__Host-tradebot_login';
 
-type Account = { balance: number; currency: string; expiresAt: number };
+type Account = { id?: string; token?: string; balance: number; currency: string; expiresAt: number };
 type Login = { state: string; verifier: string; expiresAt: number };
 type Candle = { epoch: number; open: number; high: number; low: number; close: number };
 
@@ -57,18 +61,20 @@ async function fetchJson(fetcher: typeof fetch, url: string, options: RequestIni
 }
 
 type DemoLookup =
-  | { account: { balance: number; currency: string } }
+  | { account: { id?: string; balance: number; currency: string } }
   | { error: 'account-response' | 'no-demo' | 'demo-inactive' | 'demo-balance' };
 
 function findDemoAccount(data: unknown): DemoLookup {
   if (!Array.isArray(data)) return { error: 'account-response' };
+
   const demoAccounts = data.filter(account => account?.account_type === 'demo');
   const activeAccounts = demoAccounts.filter(account => account.status === 'active');
-  for (const { balance, currency } of activeAccounts) {
+  for (const { account_id, balance, currency } of activeAccounts) {
     const amount = typeof balance === 'string' && /^-?\d+(?:\.\d+)?$/.test(balance)
       ? Number(balance) : balance;
     if (Number.isFinite(amount) && typeof currency === 'string' && /^[A-Z]{3,6}$/.test(currency)) {
-      return { account: { balance: amount, currency } };
+      return { account: { id: typeof account_id === 'string' && /^DOT\d{1,10}$/.test(account_id) ? account_id : undefined,
+        balance: amount, currency } };
     }
   }
   if (activeAccounts.length) return { error: 'demo-balance' };
@@ -149,9 +155,24 @@ export function simulate(candles: Candle[], now = Math.floor(Date.now() / 1000))
 
 export function createApp({
   appId = APP_ID, fetcher = fetch, market = readCandles,
-}: { appId?: string; fetcher?: typeof fetch; market?: typeof readCandles } = {}) {
+  executionEnabled = process.env.DEMO_EXECUTION_ENABLED === 'true',
+  store, broker = openDemoBroker, automatic = true,
+  upstreamBase = process.env.TRADEBOT_UPSTREAM_BASE,
+  bridgeKey = process.env.TRADEBOT_BRIDGE_KEY,
+}: { appId?: string; fetcher?: typeof fetch; market?: typeof readCandles; executionEnabled?: boolean;
+  store?: DemoStore; broker?: typeof openDemoBroker; automatic?: boolean;
+  upstreamBase?: string; bridgeKey?: string } = {}) {
+  if (upstreamBase) {
+    if (!bridgeKey) throw new Error('Credencial da conexão VPS ausente.');
+    return createBridge(upstreamBase,bridgeKey,fetcher);
+  }
   const app = express();
   app.disable('x-powered-by');
+  app.get('/healthz', (_req,res) => res.json({mode:'DEMO_ONLY',runtime:'VPS'}));
+  if (bridgeKey) app.use((req,res,next) => {
+    if (!validBridgeKey(req.get('X-Tradebot-Bridge'),bridgeKey)) return res.sendStatus(403);
+    next();
+  });
   app.use(express.json({ limit: '4kb' }));
   app.use((_req, res, next) => {
     res.set('Referrer-Policy', 'no-referrer');
@@ -166,6 +187,38 @@ export function createApp({
   const logins = new Map<string, Login>();
   const accounts = new Map<string, Account>();
   const candleCache = new Map<string, { value: Promise<Candle[]>; expiresAt: number }>();
+  // Render requires an explicit persistent-disk location before enabling execution.
+  const executionConfigured = executionEnabled && Boolean(appId) &&
+    (process.env.RENDER !== 'true' || Boolean(process.env.TRADEBOT_DATA_DIR) || Boolean(store));
+  const ledger = executionConfigured ? store ?? new DemoStore(path.join(
+    process.env.TRADEBOT_DATA_DIR || path.resolve('data'), 'demo.sqlite')) : undefined;
+  const engine = ledger ? new DemoEngine(ledger, () => market(SYMBOL), Date.now, automatic) : undefined;
+
+  function activeAccount(req: Request) {
+    const session = readCookie(req, SESSION_COOKIE);
+    const account = accounts.get(session);
+    if (account && account.expiresAt > Date.now()) return account;
+    if (account?.id) engine?.stop(account.id, 'Sessão expirada; reconecte a conta demo.');
+    accounts.delete(session);
+  }
+  function openBroker(account: Account): Promise<Broker> {
+    if (!account.id || !account.token || !appId) return Promise.reject(new Error('Reconecte a conta demo.'));
+    return broker({ id: account.id, currency: account.currency, token: account.token }, appId, fetcher);
+  }
+  const maintenance = setInterval(() => {
+    for (const [session, account] of accounts) {
+      if (account.expiresAt <= Date.now()) {
+        if (account.id) engine?.stop(account.id, 'Sessão expirada; reconecte a conta demo.');
+        accounts.delete(session);
+      }
+    }
+    prune(logins);
+  }, 15_000);
+  maintenance.unref();
+  app.locals.demoEngine = engine;
+  app.locals.shutdown = async () => {
+    clearInterval(maintenance); accounts.clear(); await engine?.close(); if (!store) ledger?.close();
+  };
 
   function cachedCandles(symbol: string) {
     const cached = getActive(candleCache, symbol);
@@ -230,10 +283,13 @@ export function createApp({
 
       prune(accounts);
       if (accounts.size >= 500) return res.redirect(303, '/?login=busy');
+      const previous = accounts.get(readCookie(req, SESSION_COOKIE));
+      if (previous?.id) engine?.stop(previous.id, 'Nova conexão; início manual necessário.');
       accounts.delete(readCookie(req, SESSION_COOKIE));
       const session = randomId();
       const maxAge = Math.floor(Math.min(token.expires_in, 3600));
       accounts.set(session, {
+        id: demo.id, token: engine && demo.id ? token.access_token : undefined,
         balance: demo.balance, currency: demo.currency, expiresAt: Date.now() + maxAge * 1000,
       });
       writeCookie(res, SESSION_COOKIE, session, maxAge);
@@ -245,26 +301,64 @@ export function createApp({
 
   app.post('/auth/logout', (req, res) => {
     if (req.get('Origin') !== new URL(CALLBACK).origin) return res.sendStatus(403);
+    const account = accounts.get(readCookie(req, SESSION_COOKIE));
+    if (account?.id) engine?.stop(account.id, 'Logout solicitado. Reconecte para verificar contratos pendentes.');
     accounts.delete(readCookie(req, SESSION_COOKIE));
     writeCookie(res, SESSION_COOKIE, '', 0);
     return res.redirect(303, '/');
   });
 
   app.get('/api/status', (req, res) => {
-    const account = getActive(accounts, readCookie(req, SESSION_COOKIE));
+    const account = activeAccount(req);
+    const execution = account?.id && engine ? engine.status(account.id) : null;
     res.json({
-      mode: 'DEMO_ONLY', connected: Boolean(account), running: false,
+      mode: 'DEMO_ONLY', connected: Boolean(account), running: execution?.running ?? false,
       balance: account?.balance ?? null, currency: account?.currency ?? '', trades: [],
       message: account ? 'Conta demo conectada. Saldo consultado no login.' :
         'Aguardando conexão com uma conta demo.',
-      configured: Boolean(appId), executionEnabled: false,
+      configured: Boolean(appId), executionEnabled: Boolean(engine),
+      demoReady: Boolean(engine && account?.id && account.token), realExecutionEnabled: false,
+      execution,
     });
   });
   app.post('/api/connect', (_req, res) => res.status(409).json({
     error: 'Use o login OAuth para conectar uma conta demo.', loginUrl: '/auth/login',
   }));
-  app.post('/api/start', (_req, res) => res.status(403).json({ error: 'Execução bloqueada.' }));
-  app.post('/api/stop', (_req, res) => res.json({ running: false, executionEnabled: false }));
+  app.use(['/api/start', '/api/stop', '/api/reconcile'], (req, res, next) => {
+    if (req.method !== 'POST') return next();
+    if (req.get('Origin') !== new URL(CALLBACK).origin) return res.status(403).json({ error: 'Origem não permitida.' });
+    if (!engine) return res.status(403).json({ error: 'Execução demo ainda não habilitada neste servidor.' });
+    const account = activeAccount(req);
+    if (!account?.id || !account.token) return res.status(401).json({ error: 'Reconecte a conta demo para habilitar a execução.' });
+    res.locals.account = account;
+    next();
+  });
+  app.post('/api/start', (req, res) => {
+    const account = res.locals.account as Account;
+    let limits;
+    try { limits = validateLimits(req.body); }
+    catch (error) { return res.status(400).json({ error: (error as Error).message }); }
+    try {
+      const session = readCookie(req, SESSION_COOKIE);
+      const id = engine!.start(account.id!, limits,
+        () => accounts.get(session) === account && account.expiresAt > Date.now(), () => openBroker(account));
+      return res.json({ runId: id, ...engine!.status(account.id!) });
+    } catch (error) { return res.status(409).json({ error: (error as Error).message }); }
+  });
+  app.post('/api/stop', (_req, res) => {
+    const account = res.locals.account as Account;
+    engine!.stop(account.id!);
+    return res.json(engine!.status(account.id!));
+  });
+  app.post('/api/reconcile', async (_req, res) => {
+    const account = res.locals.account as Account;
+    try {
+      await engine!.reconcile(account.id!, () => openBroker(account));
+      return res.json(engine!.status(account.id!));
+    } catch {
+      return res.status(409).json({ error: 'Há pendências ainda não liquidadas ou uma compra sem confirmação. Confira o extrato Deriv; o bot não reenviará compras.' });
+    }
+  });
 
   app.get('/api/market/:symbol', async (req, res) => {
     const { symbol } = req.params;
@@ -290,5 +384,10 @@ export function createApp({
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  createApp().listen(PORT, HOST, () => console.log('TradeBot Pro em ' + HOST + ':' + PORT));
+  const app = createApp();
+  const server = app.listen(PORT, HOST, () => console.log('TradeBot Pro em ' + HOST + ':' + PORT));
+  for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, async () => {
+    await app.locals.shutdown();
+    server.close(() => process.exit(0));
+  });
 }
