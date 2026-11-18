@@ -18,12 +18,16 @@
     .warning{border-left:4px solid #e6ae46;padding:12px;background:#292538}
     .table-wrap{overflow-x:auto} table{width:100%;border-collapse:collapse;text-align:left}
     th,td{padding:8px;border-bottom:1px solid #2b3b56;white-space:nowrap}
+    label{display:flex;flex-direction:column;gap:7px;color:#a6b6cf}
+    input{box-sizing:border-box;width:100%;background:#0c1220;color:#eef2ff;border:1px solid #536582;border-radius:7px;padding:10px;font:inherit}
+    fieldset{border:0;padding:0;margin:0} #stop-demo{background:#b33f51}
+    [hidden]{display:none!important} .hint{font-size:14px;color:#a6b6cf;line-height:1.5}
   </style>
 </head>
 <body>
 <main>
   <h1>TradeBot Pro</h1>
-  <p class="warning">Execução bloqueada. O painel só conecta contas demo e nenhuma ordem é enviada à Deriv.</p>
+  <p class="warning">Somente conta demo. A execução demo usa saldo virtual da Deriv; contas reais permanecem bloqueadas. A simulação histórica usa créditos separados.</p>
   <div class="grid">
     <div class="card"><div class="label">Conta Deriv</div><div class="value" id="connection">—</div></div>
     <div class="card"><div class="label">Saldo demo no login</div><div class="value" id="balance">—</div></div>
@@ -33,6 +37,35 @@
     <form method="post" action="/auth/logout" id="logout" hidden><button>Sair</button></form>
   </div>
   <p id="account-message" role="status"></p>
+
+  <section aria-labelledby="demo-title">
+    <h2 id="demo-title">Operar na conta demo</h2>
+    <p>Volatility 100 (1s), Alta/Baixa, contratos de 1 minuto. O sinal segue os dois últimos fechamentos. A compra ocorre após o fechamento da vela, pelo preço disponível na Deriv.</p>
+    <p class="hint">Uma operação por vez, sem aumentar o valor após perdas. Cada execução dura até 20 minutos. Parar impede novas compras; um contrato comprado segue até a liquidação. Sair ou perder a sessão também interrompe novas compras.</p>
+    <form id="demo-form">
+      <fieldset id="demo-settings" disabled>
+        <div class="grid">
+          <label>Valor por operação (moeda da conta)<input id="stake" name="stake" type="number" value="1" min="0.35" max="10" step="0.01" required></label>
+          <label>Perda líquida máxima por execução<input id="max-loss" name="maxLoss" type="number" value="3" min="0.35" max="50" step="0.01" required></label>
+          <label>Máximo de operações<input id="max-trades" name="maxTrades" type="number" value="3" min="1" max="20" step="1" required></label>
+        </div>
+        <button type="submit" id="start-demo">Iniciar operações demo</button>
+      </fieldset>
+    </form>
+    <div class="actions" style="margin-top:12px">
+      <button type="button" id="stop-demo" disabled>Parar novas compras</button>
+      <button type="button" id="reconcile-demo" disabled>Verificar pendências</button>
+    </div>
+    <p id="demo-message" role="status">Consultando disponibilidade da execução demo…</p>
+    <div id="demo-summary" class="hint"></div>
+    <div class="table-wrap">
+      <table aria-label="Histórico de operações demo">
+        <thead><tr><th>Data</th><th>Direção</th><th>Valor</th><th>Contrato</th><th>Estado</th><th>Resultado</th></tr></thead>
+        <tbody id="demo-trades"></tbody>
+      </table>
+    </div>
+    <p class="hint">Até 100 registros recentes, separados por conta. Após reiniciar o servidor é necessário reconectar e iniciar manualmente. Compras sem confirmação bloqueiam uma nova execução e nunca são reenviadas automaticamente.</p>
+  </section>
 
   <h2>Simulação histórica</h2>
   <p>Volatility 100 (1s), velas de 1 minuto. A direção segue a variação entre os dois últimos fechamentos. A operação entra na abertura da vela seguinte e termina no fechamento.</p>
@@ -75,10 +108,38 @@
     ['account-response', 'A Deriv aceitou o login, mas retornou a lista de contas em um formato inesperado.'],
     ['unavailable', 'Não foi possível concluir a conexão com a Deriv. Tente novamente.'],
   ]);
+  let demoBusy = false;
+  const tradeStates = {pending:'Sem confirmação',open:'Aguardando liquidação',settled:'Liquidado',rejected:'Rejeitado'};
+  function renderExecution(status) {
+    const execution = status.execution;
+    const monitoring = execution?.monitoring || false;
+    byId('demo-settings').disabled = demoBusy || !status.demoReady || monitoring || execution?.unresolved > 0;
+    byId('stop-demo').disabled = demoBusy || !status.demoReady || !status.running;
+    byId('reconcile-demo').disabled = demoBusy || !status.demoReady || monitoring || !execution?.unresolved;
+    if (!demoBusy) byId('demo-message').textContent = !status.executionEnabled
+      ? 'Execução demo aguardando habilitação e armazenamento persistente no servidor.'
+      : !status.demoReady ? 'Conecte novamente a conta demo para autorizar esta versão.'
+      : execution?.message || (execution?.unresolved ? 'Há contratos pendentes. Verifique antes de iniciar.' :
+        execution?.run?.reason || 'Pronto. Defina os limites e inicie quando desejar.');
+    byId('demo-summary').textContent = execution?.run
+      ? 'Última execução: ' + date.format(execution.run.started_at) +
+        ' · Valor: ' + credits.format(execution.run.stake) + ' ' + status.currency +
+        ' · Limite de perda: ' + credits.format(execution.run.max_loss) +
+        ' · Limite de operações: ' + execution.run.max_trades : '';
+    byId('demo-trades').replaceChildren(...(execution?.trades || []).map(trade => {
+      const row = document.createElement('tr');
+      for (const value of [date.format(trade.created_at), trade.direction === 'CALL' ? 'Alta' : 'Baixa',
+        credits.format(trade.stake), trade.contract_id ?? '—', tradeStates[trade.state] || trade.state,
+        trade.profit === null ? '—' : credits.format(trade.profit) + ' ' + status.currency]) {
+        row.insertCell().textContent = value;
+      }
+      return row;
+    }));
+  }
 
   async function refreshAccount() {
     try {
-      const response = await fetch('/api/status');
+      const response = await fetch('/api/status', {signal:AbortSignal.timeout(5000)});
       if (!response.ok) throw new Error();
       const status = await response.json();
       byId('connection').textContent = status.connected ? 'Demo conectada' : 'Desconectada';
@@ -87,8 +148,12 @@
       byId('logout').hidden = !status.connected;
       byId('account-message').textContent = loginMessages.get(loginStatus) ||
         (status.configured ? status.message : loginMessages.get('config'));
+      renderExecution(status);
     } catch {
       byId('account-message').textContent = 'Estado da conta indisponível.';
+      byId('demo-settings').disabled = true;
+      byId('demo-message').textContent = 'Conexão com o painel indisponível. Tente parar novamente se houver execução ativa.';
+      byId('stop-demo').disabled = demoBusy;
     }
   }
 
@@ -119,8 +184,34 @@
     }
   });
 
+  async function demoAction(action, body) {
+    if (demoBusy) return;
+    demoBusy = true;
+    byId('demo-settings').disabled = true;
+    byId('stop-demo').disabled = byId('reconcile-demo').disabled = true;
+    byId('demo-message').textContent = 'Processando solicitação…';
+    let error;
+    try {
+      const response = await fetch('/api/' + action, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body || {}),
+        signal:AbortSignal.timeout(10000),
+      });
+      const result = await response.json();
+      if (!response.ok) error = result.error || 'Não foi possível concluir a solicitação.';
+    } catch { error = 'Resposta indisponível. Confira o estado antes de tentar iniciar novamente.'; }
+    finally { demoBusy = false; await refreshAccount(); }
+    if (error) byId('demo-message').textContent = error;
+  }
+  byId('demo-form').addEventListener('submit', event => {
+    event.preventDefault();
+    void demoAction('start', {stake:Number(byId('stake').value),
+      maxLoss:Number(byId('max-loss').value),maxTrades:Number(byId('max-trades').value)});
+  });
+  byId('stop-demo').addEventListener('click', () => { void demoAction('stop'); });
+  byId('reconcile-demo').addEventListener('click', () => { void demoAction('reconcile'); });
+
   refreshAccount();
-  setInterval(refreshAccount, 60_000);
+  setInterval(refreshAccount, 3_000);
 </script>
 </body>
 </html>
