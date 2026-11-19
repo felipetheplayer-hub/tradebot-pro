@@ -35,7 +35,7 @@ export interface Broker {
 }
 
 export class BrokerError extends Error {
-  constructor(public readonly code: 'rejected' | 'unavailable' | 'invalid') {
+  constructor(public readonly code: 'rejected' | 'unavailable' | 'invalid', public readonly apiCode?: string) {
     super('A conexão demo não pôde concluir a solicitação.');
   }
 }
@@ -66,7 +66,9 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
   const socket = socketFactory(validateDemoUrl(result?.data?.url));
   let sequence = 0;
   const pending = new Map<number, { resolve: (data: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  let heartbeat: NodeJS.Timeout | undefined;
   function failAll() {
+    clearInterval(heartbeat);
     for (const { reject, timer } of pending.values()) {
       clearTimeout(timer);
       reject(new BrokerError('unavailable'));
@@ -82,7 +84,11 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
       if (!request) return;
       pending.delete(message.req_id);
       clearTimeout(request.timer);
-      if (message.error) request.reject(new BrokerError('rejected'));
+      if (message.error) {
+        const apiCode = typeof message.error.code === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(message.error.code)
+          ? message.error.code : undefined;
+        request.reject(new BrokerError('rejected', apiCode));
+      }
       else request.resolve(message);
     } catch { socket.terminate(); failAll(); }
   });
@@ -109,6 +115,11 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
       });
     });
   }
+  // Sparse RB100 signals can leave the authenticated connection idle for minutes.
+  heartbeat = setInterval(() => {
+    void request({ ping: 1 }).catch(() => { socket.terminate(); failAll(); });
+  }, 30_000);
+  heartbeat.unref();
   return {
     async balance() {
       const { balance } = await request({ balance: 1 });

@@ -111,6 +111,7 @@ export class DemoEngine {
   private async tickAccount(item: Active) {
     if (item.busy) return;
     item.busy = true;
+    let operation = 'conexão demo';
     try {
       if (!item.valid()) {
         this.finish(item, 'Sessão encerrada. Reconecte para verificar contratos pendentes.');
@@ -122,6 +123,7 @@ export class DemoEngine {
       const pending = this.store.unresolved(item.account);
       for (const trade of pending) {
         if (!trade.contract_id) throw new Error('Compra sem confirmação');
+        operation = 'liquidação demo';
         const contract = await item.broker.contract(trade.contract_id);
         if (!contract.sold) { item.message = 'Aguardando liquidação do contrato demo.'; return; }
         if (contract.profit === null || !Number.isFinite(contract.profit)) throw new Error('Liquidação inválida');
@@ -136,6 +138,7 @@ export class DemoEngine {
       const retest = item.limits.strategy === 'range_retest';
       const symbol = retest ? 'RB100' : '1HZ100V';
       const maxDelay = retest ? 5 : 10;
+      operation = 'histórico de ' + symbol;
       const candles = await this.market(symbol);
       const now = Math.floor(this.now() / 1000);
       const boundary = Math.floor(now / 60) * 60;
@@ -152,8 +155,10 @@ export class DemoEngine {
         return;
       }
       const signalObservedAt = this.now();
+      operation = 'saldo demo';
       const balance = await item.broker.balance();
       if (balance < stake) { this.finish(item, 'Saldo demo insuficiente.'); this.cleanup(item); return; }
+      operation = 'cotação de ' + symbol;
       const quote = await item.broker.quote(direction, stake, symbol);
       const quoteReceivedAt = this.now();
       // Stop/logout/expiry may happen during any await. Recheck immediately before committing intent.
@@ -180,6 +185,7 @@ export class DemoEngine {
           item.message = 'Sinal expirou antes do envio da compra.';
           return;
         }
+        operation = 'compra demo';
         const contract = await item.broker.buy(quote);
         if (!Number.isSafeInteger(contract) || contract <= 0) throw new Error('Compra sem confirmação');
         this.store.bought(trade, contract, this.now());
@@ -190,9 +196,10 @@ export class DemoEngine {
         if (error instanceof BrokerError && error.code === 'rejected') this.store.reject(trade);
         throw error;
       }
-    } catch {
+    } catch (error) {
       // No automatic reconnect/resubmit after any error, including a lost buy acknowledgement.
-      this.finish(item, 'Execução interrompida. Verifique as pendências antes de reiniciar.');
+      const category = error instanceof BrokerError ? error.apiCode ?? error.code : 'falha interna';
+      this.finish(item, 'Execução interrompida em ' + operation + ' (' + category + '). Verifique as pendências antes de reiniciar.');
       this.cleanup(item);
     } finally {
       item.busy = false;

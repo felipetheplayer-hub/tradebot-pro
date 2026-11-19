@@ -249,3 +249,37 @@ test('API isola sessões, valida Origin e exige demo identificada; logout interr
     assert.equal(await login(),undefined);
   } finally {await app.locals.shutdown();store.close();await new Promise(resolve=>server.close(resolve));}
 });
+
+test('conexão demo envia ping durante espera e encerra manutenção ao fechar', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await once(server, 'listening');
+  let pings = 0;
+  let received;
+  const pingReceived = new Promise(resolve => { received = resolve; });
+  server.on('connection', socket => socket.on('message', raw => {
+    const request = JSON.parse(raw.toString());
+    assert.equal(request.ping, 1);
+    pings++;
+    socket.send(JSON.stringify({ ping: 'pong', req_id: request.req_id }));
+    received();
+  }));
+  let broker;
+  try {
+    broker = await openDemoBroker({ id: 'DOT123', currency: 'USD', token: 'fake' }, 'app',
+      async () => Response.json({ data: { url: 'wss://api.derivws.com/trading/v1/options/ws/demo?otp=fake' } }),
+      () => new WebSocket('ws://127.0.0.1:' + server.address().port));
+    t.mock.timers.tick(30000);
+    await pingReceived;
+    assert.equal(pings, 1);
+    broker.close();
+    t.mock.timers.tick(90000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(pings, 1);
+  } finally {
+    broker?.close();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise(resolve => server.close(resolve));
+    t.mock.timers.reset();
+  }
+});
