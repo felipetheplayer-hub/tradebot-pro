@@ -11,14 +11,17 @@ export type TradeAudit = {
   signal_closed_at: number; quote_received_at: number; quote_price: number;
   buy_requested_at: number; buy_confirmed_at?: number;
   settlement_observed_at?: number; contract?: ContractAudit;
-  symbol?: 'RB100' | '1HZ100V'; strategy?: 'range_retest' | 'two_closes'; quote_payout?: number;
+  symbol?: 'RB100' | '1HZ100V'; strategy?: 'range_retest' | 'range_multiplier' | 'two_closes'; quote_payout?: number;
+  product?: 'multiplier'; multiplier?: number; stop_loss?: number; take_profit?: number;
+  close_at?: number; close_requested_at?: number; technical_test?: boolean;
   buy_error?: 'rejected' | 'unavailable' | 'invalid' | 'unknown';
 };
 
-export type Limits = { stake: number; maxLoss: number; maxTrades: number; strategy?: 'range_retest' };
+export type Limits = { stake: number; maxLoss: number; maxTrades: number; strategy?: 'range_retest' | 'range_multiplier'; test?: true };
 export type Trade = {
   id: string; run_id: string; signal_epoch: number; direction: Direction; stake: number;
   contract_id: number | null; state: string; profit: number | null; created_at: number;
+  audit?: TradeAudit | null;
 };
 export const accountKey = (id: string) => createHash('sha256').update('tradebot-demo:' + id).digest('hex');
 
@@ -42,6 +45,7 @@ export class DemoStore {
         UNIQUE(account, signal_epoch)
       );
       CREATE TABLE IF NOT EXISTS range_runs (run_id TEXT PRIMARY KEY REFERENCES runs(id));
+      CREATE TABLE IF NOT EXISTS multiplier_runs (run_id TEXT PRIMARY KEY REFERENCES runs(id), technical_test INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS trades_account ON trades(account, created_at);
       UPDATE runs SET state='stopped', reason='Servidor reiniciado; início manual necessário.',
         ended_at=unixepoch()*1000 WHERE state='running';
@@ -61,6 +65,7 @@ export class DemoStore {
         VALUES (?,?,'running','Aguardando próximo sinal.',?,?,?,?)`)
         .run(id, account, limits.stake, limits.maxLoss, limits.maxTrades, now);
       if (limits.strategy === 'range_retest') this.db.prepare('INSERT INTO range_runs VALUES (?)').run(id);
+      if (limits.strategy === 'range_multiplier') this.db.prepare('INSERT INTO multiplier_runs VALUES (?,?)').run(id, limits.test ? 1 : 0);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return id;
@@ -100,13 +105,16 @@ export class DemoStore {
   reject(id: string) { this.db.prepare("UPDATE trades SET state='rejected' WHERE id=?").run(id); }
   unresolved(account: string): Trade[] {
     return this.db.prepare("SELECT * FROM trades WHERE account=? AND state IN ('pending','open') ORDER BY created_at")
-      .all(account) as Trade[];
+      .all(account).map(({ audit_json, ...trade }) => ({ ...trade,
+        audit: audit_json ? JSON.parse(String(audit_json)) : null })) as Trade[];
   }
   summary(account: string) {
-    const run = this.db.prepare(`SELECT *, CASE WHEN id IN (SELECT run_id FROM range_runs)
-      THEN 'RB100' ELSE '1HZ100V' END AS symbol FROM runs WHERE account=? ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(account);
+    const run = this.db.prepare(`SELECT *, CASE WHEN id IN (SELECT run_id FROM range_runs UNION SELECT run_id FROM multiplier_runs)
+      THEN 'RB100' ELSE '1HZ100V' END AS symbol,
+      CASE WHEN id IN (SELECT run_id FROM multiplier_runs) THEN 'multiplier' ELSE 'binary' END AS product
+      FROM runs WHERE account=? ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(account);
     const trades = this.db.prepare(`SELECT id,run_id,signal_epoch,direction,stake,contract_id,state,profit,created_at,audit_json,
-      CASE WHEN run_id IN (SELECT run_id FROM range_runs) THEN 'RB100' ELSE '1HZ100V' END AS symbol
+      CASE WHEN run_id IN (SELECT run_id FROM range_runs UNION SELECT run_id FROM multiplier_runs) THEN 'RB100' ELSE '1HZ100V' END AS symbol
       FROM trades WHERE account=? ORDER BY created_at DESC, rowid DESC LIMIT 100`).all(account)
       .map(({ audit_json, ...trade }) => ({ ...trade, audit: audit_json ? JSON.parse(String(audit_json)) : null }));
     return { run: run ?? null, trades, unresolved: this.unresolved(account).length };

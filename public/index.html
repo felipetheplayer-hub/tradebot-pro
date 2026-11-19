@@ -40,17 +40,19 @@
 
   <section aria-labelledby="demo-title">
     <h2 id="demo-title">Operar na conta demo</h2>
-    <p>Contratos demo de Alta/Baixa com duração de um minuto. No Volatility 100 (1s), o sinal segue os dois últimos fechamentos.</p>
+    <p>Selecione a estratégia e os limites da execução demo. O Volatility 100 (1s) usa Alta/Baixa de um minuto. O RB100 também oferece multiplicadores com saída programada.</p>
     <p class="hint">Uma operação por vez, sem aumentar o valor após perdas. Cada execução dura até 20 minutos. Parar impede novas compras; um contrato comprado segue até a liquidação. Sair ou perder a sessão também interrompe novas compras.</p>
     <form id="demo-form">
       <fieldset id="demo-settings" disabled>
         <label>Estratégia demo
           <select id="demo-strategy">
             <option value="default">Volatility 100 (1s) · dois fechamentos</option>
+            <option value="range_multiplier">Range Break 100 · multiplicadores (experimental)</option>
             <option value="range_retest">Range Break 100 · retorno do limite (experimental)</option>
           </select>
         </label>
         <p class="hint" id="range-rule" hidden>Ao iniciar, o bot verifica se a conta demo aceita cotações de Alta e Baixa de 1 minuto no RB100. Alta no piso ou Baixa no teto das 60 velas anteriores, após dois toques no mesmo limite. O bot envia a compra em até 5 segundos após o fechamento e exige cotação com ganho mínimo de 90% da entrada.</p>
+        <p class="hint" id="multiplier-rule" hidden>Alta no piso ou Baixa no teto das 60 velas anteriores, com dois toques. Menor multiplicador aprovado pela conta, até 400, stop-loss de 50% da entrada e take-profit igual à entrada, enviados à Deriv. O bot solicita a venda após 60 segundos da confirmação da compra se o contrato continuar aberto. A execução e a conexão podem alterar o momento da saída. Valor mínimo de 1,00. Os resultados históricos de Alta/Baixa precisam de nova avaliação para multiplicadores.</p>
         <div class="grid">
           <label>Valor por operação (moeda da conta)<input id="stake" name="stake" type="number" value="1" min="0.35" max="10" step="0.01" required></label>
           <label>Perda líquida máxima por execução<input id="max-loss" name="maxLoss" type="number" value="3" min="0.35" max="50" step="0.01" required></label>
@@ -63,6 +65,8 @@
       <button type="button" id="stop-demo" disabled>Parar novas compras</button>
       <button type="button" id="reconcile-demo" disabled>Verificar pendências</button>
     </div>
+    <p class="hint">O teste técnico abre uma única compra demo de Alta no RB100 com 1,00 virtual, multiplicador aprovado pela conta (até 400), stop-loss de 0,50 e take-profit de 1,00. Solicita a venda após 60 segundos se ainda estiver aberta. Esse teste verifica a integração e pode ser encerrado antecipadamente pelos limites da Deriv.</p>
+    <button type="button" id="test-multiplier" disabled>Testar 1 multiplicador demo</button>
     <p id="demo-message" role="status">Consultando disponibilidade da execução demo…</p>
     <div id="demo-summary" class="hint"></div>
     <div class="table-wrap">
@@ -122,7 +126,14 @@
     };
     const lines = !audit ? ['Registro anterior à auditoria detalhada. Dados adicionais não registrados.'] : [
       'Horários de Brasília; preços e horários de entrada/saída são informados pela Deriv.',
-      'Mercado: ' + (trade.symbol || '1HZ100V'),
+      'Mercado: ' + (trade.symbol || '1HZ100V') + (trade.audit?.product === 'multiplier' ? ' · ×' + trade.audit.multiplier : '') + (trade.audit?.technical_test ? ' · Teste técnico' : ''),
+      ...(audit.product === 'multiplier' ? [
+        'Multiplicador: ' + audit.multiplier + ' · Stop-loss: ' + audit.stop_loss + ' · Take-profit: ' + audit.take_profit,
+        'Venda programada: ' + auditTime(audit.close_at),
+        'Venda solicitada: ' + auditTime(audit.close_requested_at),
+        'Comissão Deriv: ' + (contract.commission ?? 'Não registrado'),
+        'Teste técnico: ' + (audit.technical_test ? 'Sim' : 'Não'),
+      ] : []),
       ...(audit.quote_payout == null ? [] : ['Pagamento bruto cotado: ' + audit.quote_payout]),
       'Fechamento anterior: ' + (audit.previous_close ?? 'Não registrado'),
       'Fechamento do sinal: ' + (audit.signal_close ?? 'Não registrado'),
@@ -169,6 +180,7 @@
     const execution = status.execution;
     const monitoring = execution?.monitoring || false;
     byId('demo-settings').disabled = demoBusy || !status.demoReady || monitoring || execution?.unresolved > 0;
+    byId('test-multiplier').disabled = demoBusy || !status.demoReady || monitoring || execution?.unresolved > 0;
     byId('stop-demo').disabled = demoBusy || !status.demoReady || !status.running;
     byId('reconcile-demo').disabled = demoBusy || !status.demoReady || monitoring || !execution?.unresolved;
     if (!demoBusy) byId('demo-message').textContent = !status.executionEnabled
@@ -178,13 +190,14 @@
         execution?.run?.reason || 'Pronto. Defina os limites e inicie quando desejar.');
     byId('demo-summary').textContent = execution?.run
       ? 'Última execução: ' + date.format(execution.run.started_at) + ' · ' + (execution.run.symbol || '1HZ100V') +
+        (execution.run.product === 'multiplier' ? ' · Multiplicadores' : '') +
         ' · Valor: ' + credits.format(execution.run.stake) + ' ' + status.currency +
         ' · Limite de perda: ' + credits.format(execution.run.max_loss) +
         ' · Limite de operações: ' + execution.run.max_trades : '';
     const expanded = new Set([...byId('demo-trades').querySelectorAll('details[open]')].map(d => d.dataset.tradeId));
     byId('demo-trades').replaceChildren(...(execution?.trades || []).map(trade => {
       const row = document.createElement('tr');
-      for (const value of [date.format(trade.created_at), (trade.direction === 'CALL' ? 'Alta' : 'Baixa') + ' · ' + (trade.symbol || '1HZ100V'),
+      for (const value of [date.format(trade.created_at), (trade.direction === 'CALL' ? 'Alta' : 'Baixa') + ' · ' + (trade.symbol || '1HZ100V') + (trade.audit?.product === 'multiplier' ? ' · ×' + trade.audit.multiplier : '') + (trade.audit?.technical_test ? ' · Teste técnico' : ''),
         credits.format(trade.stake), trade.contract_id ?? '—', tradeStates[trade.state] || trade.state,
         trade.profit === null ? '—' : credits.format(trade.profit) + ' ' + status.currency]) {
         row.insertCell().textContent = value;
@@ -262,12 +275,18 @@
     if (error) byId('demo-message').textContent = error;
   }
   byId('demo-strategy').addEventListener('change', () => {
-    byId('range-rule').hidden = byId('demo-strategy').value !== 'range_retest';
+    const strategy = byId('demo-strategy').value;
+    byId('range-rule').hidden = strategy !== 'range_retest';
+    byId('multiplier-rule').hidden = strategy !== 'range_multiplier';
+    byId('stake').min = strategy === 'range_multiplier' ? '1' : '0.35';
   });
   byId('demo-form').addEventListener('submit', event => {
     event.preventDefault();
-    void demoAction('start', {...(byId('demo-strategy').value === 'range_retest' ? {strategy:'range_retest'} : {}), stake:Number(byId('stake').value),
+    void demoAction('start', {...(byId('demo-strategy').value !== 'default' ? {strategy:byId('demo-strategy').value} : {}), stake:Number(byId('stake').value),
       maxLoss:Number(byId('max-loss').value),maxTrades:Number(byId('max-trades').value)});
+  });
+  byId('test-multiplier').addEventListener('click', () => {
+    void demoAction('start', {strategy:'range_multiplier', test:true, stake:1, maxLoss:1, maxTrades:1});
   });
   byId('stop-demo').addEventListener('click', () => { void demoAction('stop'); });
   byId('reconcile-demo').addEventListener('click', () => { void demoAction('reconcile'); });

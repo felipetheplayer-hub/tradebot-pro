@@ -25,7 +25,10 @@ async function refresh() {
       return;
     }
     const history = status.execution?.trades;
-    const trades = Array.isArray(history) ? history.filter(t => (t.symbol || '1HZ100V') === el('market').value) : null;
+    const trades = Array.isArray(history) ? history.filter(t => {
+      const market = t.audit?.product === 'multiplier' ? 'RB100_MULT' : (t.symbol || '1HZ100V');
+      return market === el('market').value && !t.audit?.technical_test;
+    }) : null;
     if (!Array.isArray(trades)) {
       el('demo-status').textContent = 'O histórico de execução está indisponível para esta sessão.';
       return;

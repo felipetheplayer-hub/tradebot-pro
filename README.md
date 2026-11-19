@@ -41,3 +41,11 @@ Após habilitar a versão nova, reconecte a conta demo: sessões antigas não co
 `npm test` cobre isolamento de sessões/contas, Origin, rejeição de contas reais, limites, concorrência, parada durante cotação, logout, expiração, dados antigos, saldo insuficiente, timeout de compra, rejeição explícita, persistência, exclusão mútua do banco e reconciliação após reinício. As compras dos testes usam corretora simulada, sem ordens à Deriv.
 
 Referências: [OTP e canal demo](https://developers.deriv.com/docs/options/websocket/), [schemas oficiais](https://github.com/deriv-com/deriv-api-schemas), [compra de contrato](https://developers.deriv.com/docs/trading/buy/). A API V2 usa `underlying_symbol`; IDs de cotações unárias são informativos, por isso a compra usa `buy: "1"`, os mesmos parâmetros e um teto de preço.
+
+## Multiplicadores RB100 em demo
+
+A estratégia `range_multiplier` usa a mesma condição de retorno ao limite e contrata MULTUP/MULTDOWN com o menor multiplicador aprovado na conta, até 400. As propostas devem confirmar stop-loss de 50% da entrada e take-profit igual à entrada. O valor mínimo é 1,00 na moeda da conta. As propostas são consultadas na conta demo. Uma divergência entre catálogo e validação da cotação só permite repetir a consulta com o menor multiplicador explicitamente aceito pela API, limitado a 400.
+
+O motor solicita a venda após 60 segundos da confirmação da compra. Stop-loss e take-profit ficam no contrato da Deriv. Parada ou expiração da sessão solicitam o fechamento do multiplicador existente enquanto a conexão estiver disponível. Reinícios exigem reconectar e verificar pendências para consultar e encerrar contratos conhecidos cujo prazo já passou. Uma compra sem recibo continua bloqueando novas compras.
+
+O botão de teste técnico envia uma única compra demo de Alta de 1,00 virtual, com os mesmos limites. O histórico identifica o teste. A análise de desempenho apresenta multiplicadores separadamente e exclui compras de teste técnico. O desempenho histórico direcional do estudo exige nova validação financeira com esses contratos.

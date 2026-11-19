@@ -4,12 +4,13 @@ export type DemoIdentity = { id: string; currency: string; token: string };
 export type Direction = 'CALL' | 'PUT';
 export type DemoSymbol = '1HZ100V' | 'RB100';
 export type ContractAudit = {
+  multiplier?: number; commission?: number;
   underlying_symbol?: string; contract_type?: string; currency?: string;
   buy_price?: number; payout?: number; sell_price?: number;
   date_start?: number; date_expiry?: number; sell_time?: number;
   entry_spot?: number; entry_spot_time?: number; exit_spot?: number; exit_spot_time?: number;
 };
-export type Contract = { id: number; sold: boolean; profit: number | null; audit?: ContractAudit };
+export type Contract = { id: number; sold: boolean; profit: number | null; audit?: ContractAudit; sellable?: boolean };
 
 // Whitelist only contract facts. Never persist raw messages, echo_req, tokens or OTP URLs.
 export function contractAudit(contract: Record<string, unknown>): ContractAudit {
@@ -18,7 +19,7 @@ export function contractAudit(contract: Record<string, unknown>): ContractAudit 
     const value = contract[key];
     if (typeof value === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(value)) audit[key] = value;
   }
-  for (const key of ['buy_price', 'payout', 'sell_price', 'date_start', 'date_expiry', 'sell_time',
+  for (const key of ['multiplier', 'commission', 'buy_price', 'payout', 'sell_price', 'date_start', 'date_expiry', 'sell_time',
     'entry_spot', 'entry_spot_time', 'exit_spot', 'exit_spot_time']) {
     const raw = contract[key];
     const value = typeof raw === 'string' && /^-?\d+(\.\d+)?$/.test(raw) ? Number(raw) : raw;
@@ -28,6 +29,8 @@ export function contractAudit(contract: Record<string, unknown>): ContractAudit 
 }
 export interface Broker {
   balance(): Promise<number>;
+  quoteMultiplier?(direction: Direction, stake: number): Promise<{ price: number; parameters: Record<string, unknown> }>;
+  sell?(id: number): Promise<void>;
   quote(direction: Direction, stake: number, symbol?: DemoSymbol): Promise<{ price: number; payout?: number; parameters: Record<string, unknown> }>;
   buy(quote: { price: number; parameters: Record<string, unknown> }): Promise<number>;
   contract(id: number): Promise<Contract>;
@@ -35,7 +38,7 @@ export interface Broker {
 }
 
 export class BrokerError extends Error {
-  constructor(public readonly code: 'rejected' | 'unavailable' | 'invalid', public readonly apiCode?: string) {
+  constructor(public readonly code: 'rejected' | 'unavailable' | 'invalid', public readonly apiCode?: string, public readonly allowedMultipliers?: number[]) {
     super('A conexão demo não pôde concluir a solicitação.');
   }
 }
@@ -107,7 +110,11 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
       if (message.error) {
         const apiCode = typeof message.error.code === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(message.error.code)
           ? message.error.code : undefined;
-        request.reject(new BrokerError('rejected', apiCode));
+        const allowed = typeof message.error.message === 'string'
+          ? /^Multiplier is not in acceptable range\. Accepts ([\d, ]+)\.?$/.exec(message.error.message) : null;
+        const allowedMultipliers = allowed ? allowed[1].split(',').map(Number)
+          .filter(value => Number.isSafeInteger(value) && value > 0 && value <= 400) : undefined;
+        request.reject(new BrokerError('rejected', apiCode, allowedMultipliers));
       }
       else request.resolve(message);
     } catch { socket.terminate(); failAll(); }
@@ -141,7 +148,45 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
   }, 30_000);
   heartbeat.unref();
   const rangeSeconds = new Set<Direction>();
+  const multipliers = new Map<Direction, number>();
   return {
+    async quoteMultiplier(direction, stake) {
+      let multiplier = multipliers.get(direction);
+      const contractType = direction === 'CALL' ? 'MULTUP' : 'MULTDOWN';
+      if (multiplier === undefined) {
+        const { contracts_for: catalog } = await request({ contracts_for: 'RB100' });
+        const values = (catalog?.available ?? []).filter((row: any) =>
+          row.underlying_symbol === 'RB100' && row.contract_type === contractType)
+          .flatMap((row: any) => row.multiplier_range ?? [])
+          .filter((value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 400);
+        if (!values.length) throw new BrokerError('invalid', 'MultiplierUnavailable');
+        multiplier = Math.min(...values);
+      }
+      const parameters = {
+        amount: stake, basis: 'stake', currency: identity.currency, underlying_symbol: 'RB100',
+        contract_type: contractType, multiplier,
+        limit_order: { stop_loss: Math.round(stake * 50) / 100, take_profit: stake },
+      };
+      let response;
+      try { response = await request({ proposal: 1, ...parameters }); }
+      catch (error) {
+        if (!(error instanceof BrokerError) || !error.allowedMultipliers?.length) throw error;
+        parameters.multiplier = Math.min(...error.allowedMultipliers);
+        response = await request({ proposal: 1, ...parameters });
+      }
+      const { proposal } = response;
+      if (!Number.isFinite(proposal?.ask_price) || proposal.ask_price <= 0 || proposal.ask_price > stake ||
+          proposal.multiplier !== parameters.multiplier ||
+          Number(proposal.limit_order?.stop_loss?.display_order_amount) !== -parameters.limit_order.stop_loss ||
+          Number(proposal.limit_order?.take_profit?.display_order_amount) !== stake) throw new BrokerError('invalid');
+      multipliers.set(direction, parameters.multiplier);
+      return { price: proposal.ask_price, parameters };
+    },
+    async sell(id) {
+      if (!Number.isSafeInteger(id) || id <= 0) throw new BrokerError('invalid');
+      const { sell } = await request({ sell: id, price: 0 });
+      if (sell?.contract_id !== id) throw new BrokerError('invalid');
+    },
     async balance() {
       const { balance } = await request({ balance: 1 });
       if (balance?.loginid !== identity.id || balance.currency !== identity.currency ||
@@ -199,7 +244,8 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
       if (contract?.contract_id !== id || ![0, 1].includes(contract?.is_sold) ||
           (sold && !Number.isFinite(profit))) throw new BrokerError('invalid');
       const audit = contractAudit(contract);
-      return { id, sold, profit: sold ? profit : null, ...(Object.keys(audit).length ? { audit } : {}) };
+      return { id, sold, profit: sold ? profit : null, ...(Object.keys(audit).length ? { audit } : {}),
+        ...(contract.is_valid_to_sell === undefined ? {} : { sellable: contract.is_valid_to_sell === 1 }) };
     },
     close() { socket.terminate(); failAll(); },
   };

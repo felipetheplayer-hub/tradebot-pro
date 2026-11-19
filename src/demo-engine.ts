@@ -1,6 +1,6 @@
 import type { Broker, Direction, DemoSymbol } from './demo-broker.js';
 import { BrokerError, RangeDurationError } from './demo-broker.js';
-import { accountKey, DemoStore, type Limits } from './demo-store.js';
+import { accountKey, DemoStore, type Limits, type Trade } from './demo-store.js';
 
 import { rangeRetest, type SignalCandle } from './range-signal.js';
 type Active = {
@@ -11,8 +11,10 @@ type Active = {
 export function validateLimits(value: unknown): Limits {
   const v = value as Limits;
   if (!v || typeof v !== 'object' || Array.isArray(v) ||
-      Object.keys(v).some(key => !['stake', 'maxLoss', 'maxTrades', 'strategy'].includes(key)) ||
-      ('strategy' in v && v.strategy !== 'range_retest') ||
+      Object.keys(v).some(key => !['stake', 'maxLoss', 'maxTrades', 'strategy', 'test'].includes(key)) ||
+      ('strategy' in v && v.strategy !== 'range_retest' && v.strategy !== 'range_multiplier') ||
+      ('test' in v && (v.test !== true || v.strategy !== 'range_multiplier' || v.maxTrades !== 1)) ||
+      (v.strategy === 'range_multiplier' && v.stake < 1) ||
       typeof v.stake !== 'number' || !Number.isFinite(v.stake) || v.stake < 0.35 || v.stake > 10 ||
       Math.abs(v.stake * 100 - Math.round(v.stake * 100)) > 1e-8 ||
       typeof v.maxLoss !== 'number' || !Number.isFinite(v.maxLoss) || v.maxLoss < v.stake || v.maxLoss > 50 ||
@@ -20,7 +22,7 @@ export function validateLimits(value: unknown): Limits {
       !Number.isInteger(v.maxTrades) || v.maxTrades < 1 || v.maxTrades > 20) {
     throw new Error('Informe valor entre 0,35 e 10,00, perda máxima até 50,00 e de 1 a 20 operações.');
   }
-  return { stake: v.stake, maxLoss: v.maxLoss, maxTrades: v.maxTrades, ...(v.strategy ? { strategy: v.strategy } : {}) };
+  return { stake: v.stake, maxLoss: v.maxLoss, maxTrades: v.maxTrades, ...(v.strategy ? { strategy: v.strategy } : {}), ...(v.test ? { test: true as const } : {}) };
 }
 
 export class DemoEngine {
@@ -93,8 +95,7 @@ export class DemoEngine {
       broker = await open();
       await broker.balance();
       for (const trade of pending) {
-        const contract = await broker.contract(trade.contract_id!);
-        if (contract.sold && contract.profit !== null) this.store.settle(trade.id, contract.profit, contract.audit, this.now());
+        await this.monitorTrade(trade, broker);
       }
     } finally { broker?.close(); this.verifying.delete(account); }
   }
@@ -113,21 +114,22 @@ export class DemoEngine {
     item.busy = true;
     let operation = 'conexão demo';
     try {
-      if (!item.valid()) {
+      if (!item.valid() && !(item.limits.strategy === 'range_multiplier' && item.broker && this.store.unresolved(item.account).length)) {
         this.finish(item, 'Sessão encerrada. Reconecte para verificar contratos pendentes.');
         this.cleanup(item);
         return;
       }
+      if (!item.valid() && item.running) this.finish(item, 'Sessão encerrada. Fechando o multiplicador existente.');
       if (this.now() - item.started >= 20 * 60_000 && item.running) this.finish(item, 'Limite de 20 minutos atingido.');
       item.broker ??= await item.open();
       const pending = this.store.unresolved(item.account);
       for (const trade of pending) {
         if (!trade.contract_id) throw new Error('Compra sem confirmação');
         operation = 'liquidação demo';
-        const contract = await item.broker.contract(trade.contract_id);
-        if (!contract.sold) { item.message = 'Aguardando liquidação do contrato demo.'; return; }
-        if (contract.profit === null || !Number.isFinite(contract.profit)) throw new Error('Liquidação inválida');
-        this.store.settle(trade.id, contract.profit, contract.audit, this.now());
+        if (!await this.monitorTrade(trade, item.broker, !item.running)) {
+          item.message = 'Acompanhando contrato demo e seu fechamento programado.';
+          return;
+        }
       }
       if (!item.running) { this.cleanup(item); return; }
       const totals = this.store.totals(item.id);
@@ -135,16 +137,21 @@ export class DemoEngine {
       if (totals.count >= maxTrades || Math.round((totals.net - stake) * 100) < -Math.round(maxLoss * 100)) {
         this.finish(item, 'Limite de operações ou de perda atingido.'); this.cleanup(item); return;
       }
-      const retest = item.limits.strategy === 'range_retest';
+      const multiplier = item.limits.strategy === 'range_multiplier';
+      const retest = item.limits.strategy === 'range_retest' || multiplier;
       const symbol = retest ? 'RB100' : '1HZ100V';
       if (retest && !item.rangeChecked) {
         for (const side of ['CALL', 'PUT'] as const) {
           operation = 'verificação inicial de ' + (side === 'CALL' ? 'Alta' : 'Baixa') + ' no RB100';
-          await item.broker.quote(side, stake, 'RB100');
+          if (multiplier) {
+            if (!item.broker.quoteMultiplier || !item.broker.sell) throw new Error('Multiplicadores indisponíveis');
+            await item.broker.quoteMultiplier(side, stake);
+          } else await item.broker.quote(side, stake, 'RB100');
           if (!item.running || !item.valid()) return;
         }
         item.rangeChecked = true;
-        item.message = 'Cotação de Alta e Baixa verificada. Aguardando sinal no RB100.';
+        item.message = multiplier ? 'MULTUP e MULTDOWN verificados. Aguardando sinal no RB100.' :
+          'Cotação de Alta e Baixa verificada. Aguardando sinal no RB100.';
       }
       const maxDelay = retest ? 5 : 10;
       operation = 'histórico de ' + symbol;
@@ -154,10 +161,10 @@ export class DemoEngine {
       const closed = [...new Map(candles.filter(c => Number.isInteger(c.epoch) && Number.isFinite(c.close) &&
         c.epoch + 60 <= now).map(c => [c.epoch, c])).values()].sort((a, b) => a.epoch - b.epoch);
       const signal = closed.at(-1), previous = closed.at(-2);
-      if (!signal || !previous || signal.epoch <= item.lastEpoch) return;
+      if (!signal || !previous || (!item.limits.test && signal.epoch <= item.lastEpoch)) return;
       item.lastEpoch = signal.epoch;
-      if (signal.epoch !== boundary - 60 || signal.epoch - previous.epoch !== 60 || now - boundary > maxDelay) return;
-      const direction: Direction | null = retest ? rangeRetest(closed) :
+      if (signal.epoch !== boundary - 60 || signal.epoch - previous.epoch !== 60 || (!item.limits.test && now - boundary > maxDelay)) return;
+      const direction: Direction | null = item.limits.test ? 'CALL' : retest ? rangeRetest(closed) :
         signal.close > previous.close ? 'CALL' : signal.close < previous.close ? 'PUT' : null;
       if (!direction) {
         if (retest) item.message = 'Aguardando fechamento em um limite com dois toques anteriores.';
@@ -168,19 +175,22 @@ export class DemoEngine {
       const balance = await item.broker.balance();
       if (balance < stake) { this.finish(item, 'Saldo demo insuficiente.'); this.cleanup(item); return; }
       operation = 'cotação de ' + symbol;
-      const quote = await item.broker.quote(direction, stake, symbol);
+      const quote: { price: number; payout?: number; parameters: Record<string, unknown> } = multiplier ? await item.broker.quoteMultiplier!(direction, stake) :
+        await item.broker.quote(direction, stake, symbol);
       const quoteReceivedAt = this.now();
       // Stop/logout/expiry may happen during any await. Recheck immediately before committing intent.
       if (!item.running || !item.valid() || this.now() - item.started >= 20 * 60_000 ||
-          this.now() / 1000 - boundary > maxDelay) return;
+          (!item.limits.test && this.now() / 1000 - boundary > maxDelay)) return;
       if (!Number.isFinite(quote.price) || quote.price <= 0 || quote.price > stake) throw new Error('Cotação inválida');
-      if (retest && (typeof quote.payout !== 'number' || !Number.isFinite(quote.payout) ||
+      if (retest && !multiplier && (typeof quote.payout !== 'number' || !Number.isFinite(quote.payout) ||
           quote.payout < 1.9 * quote.price - 1e-12)) {
         item.message = 'Sinal ignorado. O pagamento precisa oferecer ao menos 90% líquidos.';
         return;
       }
       const trade = this.store.reserve(item.account, item.id, signal.epoch, direction, stake, {
-        version: 1, symbol, strategy: retest ? 'range_retest' : 'two_closes',
+        version: 1, symbol, strategy: multiplier ? 'range_multiplier' : retest ? 'range_retest' : 'two_closes',
+        ...(multiplier ? { product: 'multiplier' as const, multiplier: Number(quote.parameters.multiplier), stop_loss: Math.round(stake * 50) / 100,
+          take_profit: stake, close_at: this.now() + 60_000, technical_test: Boolean(item.limits.test) } : {}),
         ...(Number.isFinite(quote.payout) ? { quote_payout: quote.payout } : {}),
         signal_observed_at: signalObservedAt,
         previous_epoch: previous.epoch, previous_close: previous.close, signal_close: signal.close,
@@ -189,7 +199,7 @@ export class DemoEngine {
       });
       try {
         // A synchronous ledger write can consume the rest of the entry window.
-        if (retest && this.now() / 1000 - boundary > maxDelay) {
+        if (retest && !item.limits.test && this.now() / 1000 - boundary > maxDelay) {
           this.store.reject(trade);
           item.message = 'Sinal expirou antes do envio da compra.';
           return;
@@ -198,6 +208,7 @@ export class DemoEngine {
         const contract = await item.broker.buy(quote);
         if (!Number.isSafeInteger(contract) || contract <= 0) throw new Error('Compra sem confirmação');
         this.store.bought(trade, contract, this.now());
+        if (multiplier) this.store.updateAudit(trade, { close_at: this.now() + 60_000 });
         item.message = item.running ? 'Contrato demo comprado; aguardando liquidação.' :
           'Parado. Aguardando liquidação do contrato já comprado.';
       } catch (error) {
@@ -217,6 +228,26 @@ export class DemoEngine {
       item.busy = false;
       if (!this.closing && this.automatic && this.active.get(item.account) === item) this.schedule(item);
     }
+  }
+  private async monitorTrade(trade: Trade, broker: Broker, closeNow = false) {
+    const contract = await broker.contract(trade.contract_id!);
+    if (contract.sold) {
+      if (contract.profit === null || !Number.isFinite(contract.profit)) throw new Error('Liquidação inválida');
+      this.store.settle(trade.id, contract.profit, contract.audit, this.now());
+      return true;
+    }
+    if (trade.audit?.product !== 'multiplier') return false;
+    const closeAt = trade.audit.close_at ?? trade.audit.buy_confirmed_at! + 60_000;
+    if (!closeNow && this.now() < closeAt) return false;
+    if (!broker.sell || contract.sellable !== true) throw new Error('Multiplicador aguarda fechamento. Verifique pendências.');
+    this.store.updateAudit(trade.id, { close_requested_at: this.now() });
+    // A retry first queries the same known contract. It can only reduce that position.
+    await broker.sell(trade.contract_id!);
+    const settled = await broker.contract(trade.contract_id!);
+    if (!settled.sold) return false;
+    if (settled.profit === null || !Number.isFinite(settled.profit)) throw new Error('Liquidação inválida');
+    this.store.settle(trade.id, settled.profit, settled.audit, this.now());
+    return true;
   }
   async close() {
     this.closing = true;
