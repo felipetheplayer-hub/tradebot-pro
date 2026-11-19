@@ -62,11 +62,14 @@ test('OTP aceita exclusivamente o host e caminho demo oficiais', async () => {
 test('protocolo V2 consulta identidade, limita preço e compra por parâmetros; mensagens ficam sem credenciais', async () => {
   const ws = new WebSocketServer({host:'127.0.0.1',port:0});await once(ws,'listening');
   const requests=[];
-  let wrongAccount=false;
+  let wrongAccount=false, rejectMinutes=false, rejectSeconds=false;
   ws.on('connection',socket=>socket.on('message',raw=>{
     const request=JSON.parse(raw.toString());requests.push(request);
     let result;
     if(request.balance) result={balance:{balance:10000,currency:'USD',loginid:wrongAccount?'CR123':'DOT123'}};
+    else if(request.proposal && request.underlying_symbol === 'RB100' &&
+      (request.duration_unit === 'm' ? rejectMinutes : rejectSeconds)) result={error:{code:'TradingDurationNotAllowed'}};
+    else if(request.contracts_for) result={contracts_for:{available:[{underlying_symbol:'RB100',contract_type:'MULTUP'}]}};
     else if(request.proposal) result={proposal:{id:'informational-only',ask_price:1,payout:1.95}};
     else if(request.buy) result={buy:{contract_id:123}};
     else result={proposal_open_contract:{contract_id:123,is_sold:1,profit:'0.80',
@@ -92,6 +95,17 @@ test('protocolo V2 consulta identidade, limita preço e compra por parâmetros; 
     const rangeQuote=await broker.quote('PUT',1,'RB100');
     assert.equal(rangeQuote.payout,1.95);await broker.buy(rangeQuote);
     assert.equal(requests.filter(r=>r.buy).at(-1).parameters.underlying_symbol,'RB100');
+    rejectMinutes=true;
+    const equivalent = await broker.quote('PUT',1,'RB100');
+    assert.equal(equivalent.parameters.duration,60);
+    assert.equal(equivalent.parameters.duration_unit,'s');
+    const previous = requests.length;
+    await broker.quote('PUT',1,'RB100');
+    assert.equal(requests.length,previous+1);
+    rejectSeconds=true;
+    await assert.rejects(broker.quote('PUT',1,'RB100'), error => error.apiCode === 'TradingDurationNotAllowed' && /MULTUP/.test(error.detail));
+    assert.equal(requests.at(-1).contracts_for,'RB100');
+    assert.equal(requests.filter(r=>r.buy).length,2);
     await assert.rejects(broker.quote('CALL',1,'other'));
     assert.equal(JSON.stringify(requests).includes('fake-secret'),false);
     wrongAccount=true;await assert.rejects(broker.balance());
