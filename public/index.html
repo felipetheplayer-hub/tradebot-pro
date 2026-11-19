@@ -50,7 +50,7 @@
             <option value="range_retest">Range Break 100 · retorno do limite (experimental)</option>
           </select>
         </label>
-        <p class="hint" id="range-rule" hidden>Alta no piso ou Baixa no teto das 60 velas anteriores, após dois toques no mesmo limite. O bot envia a compra em até 5 segundos após o fechamento e exige cotação com ganho mínimo de 90% da entrada.</p>
+        <p class="hint" id="range-rule" hidden>Ao iniciar, o bot verifica se a conta demo aceita cotações de Alta e Baixa de 1 minuto no RB100. Alta no piso ou Baixa no teto das 60 velas anteriores, após dois toques no mesmo limite. O bot envia a compra em até 5 segundos após o fechamento e exige cotação com ganho mínimo de 90% da entrada.</p>
         <div class="grid">
           <label>Valor por operação (moeda da conta)<input id="stake" name="stake" type="number" value="1" min="0.35" max="10" step="0.01" required></label>
           <label>Perda líquida máxima por execução<input id="max-loss" name="maxLoss" type="number" value="3" min="0.35" max="50" step="0.01" required></label>
