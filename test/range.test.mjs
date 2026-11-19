@@ -37,7 +37,7 @@ test('fluxo demo do RB100 usa o mercado correto, veta atraso e pagamento insufic
   const broker = {
     balance: async () => 20,
     quote: async (direction, stake, symbol) => {
-      assert.equal(symbol, 'RB100'); assert.equal(direction, 'CALL'); assert.equal(stake, 1);
+      assert.equal(symbol, 'RB100'); assert.ok(['CALL','PUT'].includes(direction)); assert.equal(stake, 1);
       now += lag;
       return { price: 1, payout, parameters: {} };
     },
@@ -77,4 +77,31 @@ test('fluxo demo do RB100 usa o mercado correto, veta atraso e pagamento insufic
     assert.equal(restored.status(id).trades[0].symbol, 'RB100');
     await restored.close();
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+test('RB100 detecta duração incompatível antes de procurar o primeiro sinal', async () => {
+  const { RangeDurationError } = await import('../dist/demo-broker.js');
+  const store = new DemoStore(':memory:');
+  const seen = [];
+  let candlesRead = 0, buys = 0;
+  const engine = new DemoEngine(store, async () => { candlesRead++; return []; }, () => epoch * 1000, false);
+  const broker = {
+    async quote(side) {
+      seen.push(side);
+      if (side === 'PUT') throw new RangeDurationError('Disponível apenas MULTUP.');
+      return { price: 1, payout: 1.95, parameters: {} };
+    },
+    async buy() { buys++; return 1; },
+    close() {}
+  };
+  try {
+    engine.start('DOT42', limits, () => true, async () => broker);
+    await engine.tick('DOT42');
+    const status = engine.status('DOT42');
+    assert.deepEqual(seen, ['CALL','PUT']);
+    assert.equal(candlesRead, 0);
+    assert.equal(buys, 0);
+    assert.equal(status.running, false);
+    assert.equal(status.trades.length, 0);
+    assert.match(status.run.reason, /Baixa.*TradingDurationNotAllowed.*MULTUP/);
+  } finally { await engine.close(); store.close(); }
 });
