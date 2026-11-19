@@ -40,6 +40,26 @@ export class BrokerError extends Error {
   }
 }
 
+export class RangeDurationError extends BrokerError {
+  constructor(public readonly detail: string) {
+    super('rejected', 'TradingDurationNotAllowed');
+  }
+}
+
+function rangeCatalogDescription(data: unknown): string {
+  if (!Array.isArray(data)) return 'O catálogo da conta não pôde ser consultado.';
+  const options = new Set<string>();
+  for (const row of data) {
+    if (row?.underlying_symbol !== 'RB100' || !/^[A-Z0-9_]{1,24}$/.test(row.contract_type ?? '')) continue;
+    const type = String(row.contract_type);
+    const min = String(row.min_contract_duration ?? ''), max = String(row.max_contract_duration ?? '');
+    const timed = ['CALL', 'PUT'].includes(type) && /^\d{1,8}[smhdt]$/.test(min) && /^\d{1,8}[smhdt]$/.test(max);
+    options.add(timed ? type + ' (' + min + ' a ' + max + ')' : type);
+  }
+  return options.size ? 'Contratos listados para RB100 nesta conexão: ' + [...options].join(', ') + '.' :
+    'A consulta não retornou contratos para RB100.';
+}
+
 export function validateDemoUrl(value: unknown) {
   if (typeof value !== 'string') throw new BrokerError('invalid');
   const url = new URL(value);
@@ -120,6 +140,7 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
     void request({ ping: 1 }).catch(() => { socket.terminate(); failAll(); });
   }, 30_000);
   heartbeat.unref();
+  const rangeSeconds = new Set<Direction>();
   return {
     async balance() {
       const { balance } = await request({ balance: 1 });
@@ -135,7 +156,31 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
         amount: stake, basis: 'stake', contract_type: direction, currency: identity.currency,
         duration: 1, duration_unit: 'm', underlying_symbol: symbol,
       };
-      const { proposal } = await request({ proposal: 1, ...parameters });
+      const range = symbol === 'RB100';
+      if (range && rangeSeconds.has(direction)) {
+        parameters.duration = 60;
+        parameters.duration_unit = 's';
+      }
+      const getPrice = () => request({ proposal: 1, ...parameters });
+      let response;
+      try {
+        response = await getPrice();
+      } catch (err) {
+        if (!range || !(err instanceof BrokerError) || err.apiCode !== 'TradingDurationNotAllowed') throw err;
+        const useSeconds = parameters.duration_unit === 'm';
+        parameters.duration = useSeconds ? 60 : 1;
+        parameters.duration_unit = useSeconds ? 's' : 'm';
+        try {
+          response = await getPrice();
+          if (useSeconds) rangeSeconds.add(direction);
+          else rangeSeconds.delete(direction);
+        } catch (retryError) {
+          if (!(retryError instanceof BrokerError) || retryError.apiCode !== 'TradingDurationNotAllowed') throw retryError;
+          const catalog = await request({ contracts_for: symbol }).catch(() => undefined);
+          throw new RangeDurationError(rangeCatalogDescription(catalog?.contracts_for?.available));
+        }
+      }
+      const { proposal } = response;
       if (typeof proposal?.ask_price !== 'number' || !Number.isFinite(proposal.ask_price) ||
           proposal.ask_price <= 0 || proposal.ask_price > stake) throw new BrokerError('invalid');
       return { price: proposal.ask_price, payout: proposal.payout, parameters };
