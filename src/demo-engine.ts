@@ -1,12 +1,12 @@
 import type { Broker, Direction, DemoSymbol } from './demo-broker.js';
-import { BrokerError } from './demo-broker.js';
+import { BrokerError, RangeDurationError } from './demo-broker.js';
 import { accountKey, DemoStore, type Limits } from './demo-store.js';
 
 import { rangeRetest, type SignalCandle } from './range-signal.js';
 type Active = {
   account: string; id: string; limits: Limits; valid: () => boolean; open: () => Promise<Broker>;
   started: number; lastEpoch: number; running: boolean; busy: boolean;
-  broker?: Broker; timer?: NodeJS.Timeout; message: string;
+  rangeChecked?: boolean; broker?: Broker; timer?: NodeJS.Timeout; message: string;
 };
 export function validateLimits(value: unknown): Limits {
   const v = value as Limits;
@@ -137,6 +137,15 @@ export class DemoEngine {
       }
       const retest = item.limits.strategy === 'range_retest';
       const symbol = retest ? 'RB100' : '1HZ100V';
+      if (retest && !item.rangeChecked) {
+        for (const side of ['CALL', 'PUT'] as const) {
+          operation = 'verificação inicial de ' + (side === 'CALL' ? 'Alta' : 'Baixa') + ' no RB100';
+          await item.broker.quote(side, stake, 'RB100');
+          if (!item.running || !item.valid()) return;
+        }
+        item.rangeChecked = true;
+        item.message = 'Cotação de Alta e Baixa verificada. Aguardando sinal no RB100.';
+      }
       const maxDelay = retest ? 5 : 10;
       operation = 'histórico de ' + symbol;
       const candles = await this.market(symbol);
@@ -199,7 +208,10 @@ export class DemoEngine {
     } catch (error) {
       // No automatic reconnect/resubmit after any error, including a lost buy acknowledgement.
       const category = error instanceof BrokerError ? error.apiCode ?? error.code : 'falha interna';
-      this.finish(item, 'Execução interrompida em ' + operation + ' (' + category + '). Verifique as pendências antes de reiniciar.');
+      const reason = error instanceof RangeDurationError ?
+        'A Deriv recusou o contrato RB100 de 1 minuto em ' + operation + ' (' + category + '). ' + error.detail :
+        'Execução interrompida em ' + operation + ' (' + category + '). Verifique as pendências antes de reiniciar.';
+      this.finish(item, reason);
       this.cleanup(item);
     } finally {
       item.busy = false;
