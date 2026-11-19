@@ -40,10 +40,17 @@
 
   <section aria-labelledby="demo-title">
     <h2 id="demo-title">Operar na conta demo</h2>
-    <p>Volatility 100 (1s), Alta/Baixa, contratos de 1 minuto. O sinal segue os dois últimos fechamentos. A compra ocorre após o fechamento da vela, pelo preço disponível na Deriv.</p>
+    <p>Contratos demo de Alta/Baixa com duração de um minuto. No Volatility 100 (1s), o sinal segue os dois últimos fechamentos.</p>
     <p class="hint">Uma operação por vez, sem aumentar o valor após perdas. Cada execução dura até 20 minutos. Parar impede novas compras; um contrato comprado segue até a liquidação. Sair ou perder a sessão também interrompe novas compras.</p>
     <form id="demo-form">
       <fieldset id="demo-settings" disabled>
+        <label>Estratégia demo
+          <select id="demo-strategy">
+            <option value="default">Volatility 100 (1s) · dois fechamentos</option>
+            <option value="range_retest">Range Break 100 · retorno do limite (experimental)</option>
+          </select>
+        </label>
+        <p class="hint" id="range-rule" hidden>Alta no piso ou Baixa no teto das 60 velas anteriores, após dois toques no mesmo limite. O bot envia a compra em até 5 segundos após o fechamento e exige cotação com ganho mínimo de 90% da entrada.</p>
         <div class="grid">
           <label>Valor por operação (moeda da conta)<input id="stake" name="stake" type="number" value="1" min="0.35" max="10" step="0.01" required></label>
           <label>Perda líquida máxima por execução<input id="max-loss" name="maxLoss" type="number" value="3" min="0.35" max="50" step="0.01" required></label>
@@ -60,12 +67,14 @@
     <div id="demo-summary" class="hint"></div>
     <div class="table-wrap">
       <table aria-label="Histórico de operações demo">
-        <thead><tr><th>Data</th><th>Direção</th><th>Valor</th><th>Contrato</th><th>Estado</th><th>Resultado</th></tr></thead>
+        <thead><tr><th>Data</th><th>Direção</th><th>Valor</th><th>Contrato</th><th>Estado</th><th>Resultado</th><th>Auditoria</th></tr></thead>
         <tbody id="demo-trades"></tbody>
       </table>
     </div>
     <p class="hint">Até 100 registros recentes, separados por conta. Após reiniciar o servidor é necessário reconectar e iniciar manualmente. Compras sem confirmação bloqueiam uma nova execução e nunca são reenviadas automaticamente.</p>
   </section>
+
+  <p><a class="button" href="/analise.html">Análise de desempenho</a></p>
 
   <h2>Simulação histórica</h2>
   <p>Volatility 100 (1s), velas de 1 minuto. A direção segue a variação entre os dois últimos fechamentos. A operação entra na abertura da vela seguinte e termina no fechamento.</p>
@@ -91,6 +100,52 @@
   const credits = new Intl.NumberFormat('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   const quote = new Intl.NumberFormat('pt-BR', {maximumFractionDigits: 8});
   const date = new Intl.DateTimeFormat('pt-BR', {dateStyle: 'short', timeStyle: 'short'});
+  const auditDate = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo', year:'numeric', month:'2-digit', day:'2-digit',
+    hour:'2-digit', minute:'2-digit', second:'2-digit', fractionalSecondDigits:3,
+  });
+  const auditTime = value => typeof value === 'number' && Number.isFinite(value)
+    ? auditDate.format(value) : 'Não registrado';
+  function auditDetails(trade) {
+    const details = document.createElement('details');
+    details.dataset.tradeId = trade.id;
+    const summary = document.createElement('summary');
+    summary.textContent = 'Ver detalhes';
+    details.append(summary);
+    const audit = trade.audit;
+    const savedContract = audit?.contract || {};
+    const contract = { ...savedContract,
+      entry_spot: savedContract.entry_spot ?? savedContract.entry_tick,
+      entry_spot_time: savedContract.entry_spot_time ?? savedContract.entry_tick_time,
+      exit_spot: savedContract.exit_spot ?? savedContract.exit_tick,
+      exit_spot_time: savedContract.exit_spot_time ?? savedContract.exit_tick_time,
+    };
+    const lines = !audit ? ['Registro anterior à auditoria detalhada. Dados adicionais não registrados.'] : [
+      'Horários de Brasília; preços e horários de entrada/saída são informados pela Deriv.',
+      'Mercado: ' + (trade.symbol || '1HZ100V'),
+      ...(audit.quote_payout == null ? [] : ['Pagamento bruto cotado: ' + audit.quote_payout]),
+      'Fechamento anterior: ' + (audit.previous_close ?? 'Não registrado'),
+      'Fechamento do sinal: ' + (audit.signal_close ?? 'Não registrado'),
+      'Vela anterior: ' + auditTime(audit.previous_epoch == null ? null : audit.previous_epoch * 1000),
+      'Vela do sinal: ' + auditTime(trade.signal_epoch * 1000),
+      'Vela encerrada: ' + auditTime(audit.signal_closed_at),
+      'Sinal observado: ' + auditTime(audit.signal_observed_at),
+      'Cotação recebida: ' + auditTime(audit.quote_received_at) + ' · Preço: ' + (audit.quote_price ?? 'Não registrado'),
+      'Envio solicitado: ' + auditTime(audit.buy_requested_at),
+      'Compra confirmada: ' + auditTime(audit.buy_confirmed_at),
+      'Início do contrato: ' + auditTime(contract.date_start == null ? null : contract.date_start * 1000),
+      'Entrada Deriv: ' + (contract.entry_spot ?? 'Não registrado') + ' · ' + auditTime(contract.entry_spot_time == null ? null : contract.entry_spot_time * 1000),
+      'Saída Deriv: ' + (contract.exit_spot ?? 'Não registrado') + ' · ' + auditTime(contract.exit_spot_time == null ? null : contract.exit_spot_time * 1000),
+      'Expiração Deriv: ' + auditTime(contract.date_expiry == null ? null : contract.date_expiry * 1000),
+      'Valor comprado: ' + (contract.buy_price ?? 'Não registrado') + ' · Pagamento: ' + (contract.payout ?? 'Não registrado'),
+      'Liquidação observada: ' + auditTime(audit.settlement_observed_at),
+      ...(audit.buy_error ? ['Falha na compra: ' + audit.buy_error] : []),
+    ];
+    for (const line of lines) {
+      const p = document.createElement('p'); p.textContent = line; details.append(p);
+    }
+    return details;
+  }
   const url = new URL(window.location.href);
   const loginStatus = url.searchParams.get('login');
   if (loginStatus) {
@@ -122,17 +177,21 @@
       : execution?.message || (execution?.unresolved ? 'Há contratos pendentes. Verifique antes de iniciar.' :
         execution?.run?.reason || 'Pronto. Defina os limites e inicie quando desejar.');
     byId('demo-summary').textContent = execution?.run
-      ? 'Última execução: ' + date.format(execution.run.started_at) +
+      ? 'Última execução: ' + date.format(execution.run.started_at) + ' · ' + (execution.run.symbol || '1HZ100V') +
         ' · Valor: ' + credits.format(execution.run.stake) + ' ' + status.currency +
         ' · Limite de perda: ' + credits.format(execution.run.max_loss) +
         ' · Limite de operações: ' + execution.run.max_trades : '';
+    const expanded = new Set([...byId('demo-trades').querySelectorAll('details[open]')].map(d => d.dataset.tradeId));
     byId('demo-trades').replaceChildren(...(execution?.trades || []).map(trade => {
       const row = document.createElement('tr');
-      for (const value of [date.format(trade.created_at), trade.direction === 'CALL' ? 'Alta' : 'Baixa',
+      for (const value of [date.format(trade.created_at), (trade.direction === 'CALL' ? 'Alta' : 'Baixa') + ' · ' + (trade.symbol || '1HZ100V'),
         credits.format(trade.stake), trade.contract_id ?? '—', tradeStates[trade.state] || trade.state,
         trade.profit === null ? '—' : credits.format(trade.profit) + ' ' + status.currency]) {
         row.insertCell().textContent = value;
       }
+      const details = auditDetails(trade);
+      details.open = expanded.has(trade.id);
+      row.insertCell().append(details);
       return row;
     }));
   }
@@ -202,9 +261,12 @@
     finally { demoBusy = false; await refreshAccount(); }
     if (error) byId('demo-message').textContent = error;
   }
+  byId('demo-strategy').addEventListener('change', () => {
+    byId('range-rule').hidden = byId('demo-strategy').value !== 'range_retest';
+  });
   byId('demo-form').addEventListener('submit', event => {
     event.preventDefault();
-    void demoAction('start', {stake:Number(byId('stake').value),
+    void demoAction('start', {...(byId('demo-strategy').value === 'range_retest' ? {strategy:'range_retest'} : {}), stake:Number(byId('stake').value),
       maxLoss:Number(byId('max-loss').value),maxTrades:Number(byId('max-trades').value)});
   });
   byId('stop-demo').addEventListener('click', () => { void demoAction('stop'); });

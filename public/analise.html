@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Análise de desempenho · TradeBot Pro</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #eef2ff; background: #0c1220 }
+    body { margin: 0 } main { max-width: 900px; margin: auto; padding: 28px 18px 60px }
+    a { color: #abc8ff } section { margin: 26px 0; padding: 20px; background: #172238; border: 1px solid #33435e; border-radius: 14px }
+    h1, h2 { line-height: 1.2 } h2 { margin-top: 0 } p { line-height: 1.5 }
+    .scroll { overflow-x: auto } table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums }
+    th, td { padding: 10px 8px; border-bottom: 1px solid #384860; text-align: right; white-space: nowrap }
+    th:first-child, td:first-child { text-align: left } .note { color: #bdcce0; font-size: .9rem }
+    label { display: inline-block; margin-right: 8px } input { width: 5.5rem; padding: 6px; font: inherit }
+    button { background: #365fae; color: white; border: 0; border-radius: 6px; padding: 8px 14px; font: inherit }
+    [hidden] { display: none !important }
+  </style>
+</head>
+<body><main>
+  <a href="/">Voltar ao TradeBot Pro</a>
+  <h1>Análise de desempenho</h1>
+  <section aria-labelledby="demo-title">
+    <h2 id="demo-title">Resultados da conta demo</h2>
+    <label for="market">Mercado demo</label><select id="market"><option value="1HZ100V">Volatility 100 (1s)</option><option value="RB100">Range Break 100</option></select>
+    <p id="demo-status" role="status">Consultando a conta…</p>
+    <div class="scroll" id="demo-table" hidden><table aria-label="Contratos liquidados por direção">
+      <thead><tr><th>Direção</th><th>Liquidados</th><th>Ganhos</th><th>Perdas</th><th>Neutros</th><th>Acerto</th><th>Resultado líquido</th></tr></thead>
+      <tbody id="demo-rows"></tbody></table></div>
+    <p class="note" id="timing"></p>
+    <button type="button" id="refresh">Atualizar conta</button>
+  </section>
+  <section aria-labelledby="research-title">
+    <h2 id="research-title">Comparação histórica de sinais</h2>
+    <p>Volatility 100 (1s), com horizonte de um minuto. As regras foram fixadas antes de avaliar o período reservado de 21/10 a 17/11/2026 (UTC).</p>
+    <label for="payout">Lucro por acerto para cada 1,00 arriscado</label>
+    <input id="payout" type="number" min="0.01" step="0.01" value="0.95" inputmode="decimal">
+    <p id="threshold" role="status"></p>
+    <div class="scroll"><table aria-label="Comparação no período reservado">
+      <thead><tr><th>Regra</th><th>Sinais</th><th>Acerto</th><th>Intervalo de 95%</th><th>Cobertura</th><th>Líquido por 100 sinais</th></tr></thead>
+      <tbody id="study-rows"></tbody></table></div>
+    <p class="note">Cobertura é a parcela dos minutos avaliáveis em que a regra sinalizou. A análise usa duas aberturas separadas por 60 segundos, com perda de uma unidade em caso de erro ou preço igual. O intervalo foi estimado por reamostragem de dias.</p>
+    <p class="note">O valor inicial de 0,95 vem de uma cotação pública de 18/11/2026 às 19h22 (Brasília). Aplicá-lo ao histórico é uma hipótese. O resultado de cada contrato demo depende do preço e da liquidação registrados pela Deriv.</p>
+  </section>
+</main><script type="module" src="/analise.mjs"></script></body></html>

@@ -67,9 +67,11 @@ test('protocolo V2 consulta identidade, limita preço e compra por parâmetros; 
     const request=JSON.parse(raw.toString());requests.push(request);
     let result;
     if(request.balance) result={balance:{balance:10000,currency:'USD',loginid:wrongAccount?'CR123':'DOT123'}};
-    else if(request.proposal) result={proposal:{id:'informational-only',ask_price:1}};
+    else if(request.proposal) result={proposal:{id:'informational-only',ask_price:1,payout:1.95}};
     else if(request.buy) result={buy:{contract_id:123}};
-    else result={proposal_open_contract:{contract_id:123,is_sold:1,profit:'0.80'}};
+    else result={proposal_open_contract:{contract_id:123,is_sold:1,profit:'0.80',
+      entry_spot:'1496.14',exit_spot:1496.50,date_start:1795019462,date_expiry:1795019522,
+      echo_req:{token:'fake-secret'}}};
     socket.send(JSON.stringify({...result,req_id:request.req_id}));
   }));
   let broker;
@@ -81,11 +83,17 @@ test('protocolo V2 consulta identidade, limita preço e compra por parâmetros; 
     },url=>{assert.match(url,/\/demo\?/);return new WebSocket('ws://127.0.0.1:'+ws.address().port);});
     assert.equal(await broker.balance(),10000);
     const quote=await broker.quote('CALL',1);assert.equal(await broker.buy(quote),123);
-    assert.deepEqual(await broker.contract(123),{id:123,sold:true,profit:0.8});
+    assert.deepEqual(await broker.contract(123),{id:123,sold:true,profit:0.8,
+      audit:{entry_spot:1496.14,exit_spot:1496.50,date_start:1795019462,date_expiry:1795019522}});
     const buy=requests.find(r=>r.buy);
     assert.equal(buy.buy,'1');assert.equal(buy.price,1);assert.equal(buy.parameters.underlying_symbol,'1HZ100V');
     assert.equal(buy.parameters.duration,1);assert.equal(buy.parameters.duration_unit,'m');
-    assert.equal(buy.parameters.basis,'stake');assert.equal(JSON.stringify(requests).includes('fake-secret'),false);
+    assert.equal(buy.parameters.basis,'stake');
+    const rangeQuote=await broker.quote('PUT',1,'RB100');
+    assert.equal(rangeQuote.payout,1.95);await broker.buy(rangeQuote);
+    assert.equal(requests.filter(r=>r.buy).at(-1).parameters.underlying_symbol,'RB100');
+    await assert.rejects(broker.quote('CALL',1,'other'));
+    assert.equal(JSON.stringify(requests).includes('fake-secret'),false);
     wrongAccount=true;await assert.rejects(broker.balance());
   } finally {broker?.close();for(const socket of ws.clients)socket.terminate();await new Promise(resolve=>ws.close(resolve));}
 });

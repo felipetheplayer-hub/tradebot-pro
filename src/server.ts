@@ -192,7 +192,7 @@ export function createApp({
     (process.env.RENDER !== 'true' || Boolean(process.env.TRADEBOT_DATA_DIR) || Boolean(store));
   const ledger = executionConfigured ? store ?? new DemoStore(path.join(
     process.env.TRADEBOT_DATA_DIR || path.resolve('data'), 'demo.sqlite')) : undefined;
-  const engine = ledger ? new DemoEngine(ledger, () => market(SYMBOL), Date.now, automatic) : undefined;
+  const engine = ledger ? new DemoEngine(ledger, symbol => market(symbol), Date.now, automatic) : undefined;
 
   function activeAccount(req: Request) {
     const session = readCookie(req, SESSION_COOKIE);

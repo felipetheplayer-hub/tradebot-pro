@@ -2,10 +2,33 @@ import WebSocket from 'ws';
 
 export type DemoIdentity = { id: string; currency: string; token: string };
 export type Direction = 'CALL' | 'PUT';
-export type Contract = { id: number; sold: boolean; profit: number | null };
+export type DemoSymbol = '1HZ100V' | 'RB100';
+export type ContractAudit = {
+  underlying_symbol?: string; contract_type?: string; currency?: string;
+  buy_price?: number; payout?: number; sell_price?: number;
+  date_start?: number; date_expiry?: number; sell_time?: number;
+  entry_spot?: number; entry_spot_time?: number; exit_spot?: number; exit_spot_time?: number;
+};
+export type Contract = { id: number; sold: boolean; profit: number | null; audit?: ContractAudit };
+
+// Whitelist only contract facts. Never persist raw messages, echo_req, tokens or OTP URLs.
+export function contractAudit(contract: Record<string, unknown>): ContractAudit {
+  const audit: Record<string, string | number> = {};
+  for (const key of ['underlying_symbol', 'contract_type', 'currency']) {
+    const value = contract[key];
+    if (typeof value === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(value)) audit[key] = value;
+  }
+  for (const key of ['buy_price', 'payout', 'sell_price', 'date_start', 'date_expiry', 'sell_time',
+    'entry_spot', 'entry_spot_time', 'exit_spot', 'exit_spot_time']) {
+    const raw = contract[key];
+    const value = typeof raw === 'string' && /^-?\d+(\.\d+)?$/.test(raw) ? Number(raw) : raw;
+    if (typeof value === 'number' && Number.isFinite(value)) audit[key] = value;
+  }
+  return audit as ContractAudit;
+}
 export interface Broker {
   balance(): Promise<number>;
-  quote(direction: Direction, stake: number): Promise<{ price: number; parameters: Record<string, unknown> }>;
+  quote(direction: Direction, stake: number, symbol?: DemoSymbol): Promise<{ price: number; payout?: number; parameters: Record<string, unknown> }>;
   buy(quote: { price: number; parameters: Record<string, unknown> }): Promise<number>;
   contract(id: number): Promise<Contract>;
   close(): void;
@@ -95,15 +118,16 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
       }
       return balance.balance;
     },
-    async quote(direction, stake) {
+    async quote(direction, stake, symbol = '1HZ100V') {
+      if (symbol !== '1HZ100V' && symbol !== 'RB100') throw new BrokerError('invalid');
       const parameters = {
         amount: stake, basis: 'stake', contract_type: direction, currency: identity.currency,
-        duration: 1, duration_unit: 'm', underlying_symbol: '1HZ100V',
+        duration: 1, duration_unit: 'm', underlying_symbol: symbol,
       };
       const { proposal } = await request({ proposal: 1, ...parameters });
       if (typeof proposal?.ask_price !== 'number' || !Number.isFinite(proposal.ask_price) ||
           proposal.ask_price <= 0 || proposal.ask_price > stake) throw new BrokerError('invalid');
-      return { price: proposal.ask_price, parameters };
+      return { price: proposal.ask_price, payout: proposal.payout, parameters };
     },
     async buy(quote) {
       // V2 unary proposal IDs are informational. Buy using the same parameters and a price ceiling.
@@ -118,7 +142,8 @@ export async function openDemoBroker(identity: DemoIdentity, appId: string, fetc
         typeof contract?.profit === 'string' && /^-?\d+(\.\d+)?$/.test(contract.profit) ? Number(contract.profit) : NaN;
       if (contract?.contract_id !== id || ![0, 1].includes(contract?.is_sold) ||
           (sold && !Number.isFinite(profit))) throw new BrokerError('invalid');
-      return { id, sold, profit: sold ? profit : null };
+      const audit = contractAudit(contract);
+      return { id, sold, profit: sold ? profit : null, ...(Object.keys(audit).length ? { audit } : {}) };
     },
     close() { socket.terminate(); failAll(); },
   };

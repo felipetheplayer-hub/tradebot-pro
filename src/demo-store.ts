@@ -2,9 +2,20 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Direction } from './demo-broker.js';
+import type { ContractAudit, Direction } from './demo-broker.js';
 
-export type Limits = { stake: number; maxLoss: number; maxTrades: number };
+export type TradeAudit = {
+  version: 1;
+  signal_observed_at: number;
+  previous_epoch: number; previous_close: number; signal_close: number;
+  signal_closed_at: number; quote_received_at: number; quote_price: number;
+  buy_requested_at: number; buy_confirmed_at?: number;
+  settlement_observed_at?: number; contract?: ContractAudit;
+  symbol?: 'RB100' | '1HZ100V'; strategy?: 'range_retest' | 'two_closes'; quote_payout?: number;
+  buy_error?: 'rejected' | 'unavailable' | 'invalid' | 'unknown';
+};
+
+export type Limits = { stake: number; maxLoss: number; maxTrades: number; strategy?: 'range_retest' };
 export type Trade = {
   id: string; run_id: string; signal_epoch: number; direction: Direction; stake: number;
   contract_id: number | null; state: string; profit: number | null; created_at: number;
@@ -30,34 +41,61 @@ export class DemoStore {
         profit REAL, created_at INTEGER NOT NULL,
         UNIQUE(account, signal_epoch)
       );
+      CREATE TABLE IF NOT EXISTS range_runs (run_id TEXT PRIMARY KEY REFERENCES runs(id));
       CREATE INDEX IF NOT EXISTS trades_account ON trades(account, created_at);
       UPDATE runs SET state='stopped', reason='Servidor reiniciado; início manual necessário.',
         ended_at=unixepoch()*1000 WHERE state='running';
-      COMMIT;`); }
+      COMMIT;`);
+      const columns = this.db.prepare('PRAGMA table_info(trades)').all();
+      if (!columns.some(column => column.name === 'audit_json')) {
+        this.db.exec('ALTER TABLE trades ADD COLUMN audit_json TEXT');
+      }
+    }
     catch (error) { this.db.close(); throw error; }
   }
   createRun(account: string, limits: Limits, now: number) {
     const id = randomUUID();
-    this.db.prepare(`INSERT INTO runs VALUES (?,?,'running','Aguardando próximo sinal.',?,?,?,?,NULL)`)
-      .run(id, account, limits.stake, limits.maxLoss, limits.maxTrades, now);
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare(`INSERT INTO runs (id,account,state,reason,stake,max_loss,max_trades,started_at)
+        VALUES (?,?,'running','Aguardando próximo sinal.',?,?,?,?)`)
+        .run(id, account, limits.stake, limits.maxLoss, limits.maxTrades, now);
+      if (limits.strategy === 'range_retest') this.db.prepare('INSERT INTO range_runs VALUES (?)').run(id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return id;
   }
   stop(id: string, reason: string) {
     this.db.prepare("UPDATE runs SET state='stopped',reason=?,ended_at=? WHERE id=?")
       .run(reason, Date.now(), id);
   }
-  reserve(account: string, run: string, epoch: number, direction: Direction, stake: number) {
+  reserve(account: string, run: string, epoch: number, direction: Direction, stake: number, audit?: TradeAudit) {
     const id = randomUUID();
     // Commit the intent before sending a buy. On ambiguous failure it remains unresolved.
-    this.db.prepare(`INSERT INTO trades VALUES (?,?,?,?,?,?,NULL,'pending',NULL,?)`)
-      .run(id, run, account, epoch, direction, stake, Date.now());
+    this.db.prepare(`INSERT INTO trades
+      (id,run_id,account,signal_epoch,direction,stake,contract_id,state,profit,created_at,audit_json)
+      VALUES (?,?,?,?,?,?,NULL,'pending',NULL,?,?)`)
+      .run(id, run, account, epoch, direction, stake, Date.now(), audit ? JSON.stringify(audit) : null);
     return id;
   }
-  bought(id: string, contractId: number) {
-    this.db.prepare("UPDATE trades SET state='open',contract_id=? WHERE id=?").run(contractId, id);
+  updateAudit(id: string, patch: Partial<TradeAudit>) {
+    this.db.prepare('UPDATE trades SET audit_json=? WHERE id=?').run(this.mergedAudit(id, patch), id);
   }
-  settle(id: string, profit: number) {
-    this.db.prepare("UPDATE trades SET state='settled',profit=? WHERE id=?").run(profit, id);
+  private mergedAudit(id: string, patch: Partial<TradeAudit>) {
+    const row = this.db.prepare('SELECT audit_json FROM trades WHERE id=?').get(id);
+    if (!row) throw new Error('Operação não encontrada.');
+    const existing = row.audit_json ? JSON.parse(String(row.audit_json)) : {};
+    return JSON.stringify({ ...existing, ...patch });
+  }
+  bought(id: string, contractId: number, confirmedAt = Date.now()) {
+    const audit = this.mergedAudit(id, { buy_confirmed_at: confirmedAt });
+    this.db.prepare("UPDATE trades SET state='open',contract_id=?,audit_json=? WHERE id=?")
+      .run(contractId, audit, id);
+  }
+  settle(id: string, profit: number, contract?: ContractAudit, observedAt = Date.now()) {
+    const audit = this.mergedAudit(id, { settlement_observed_at: observedAt, ...(contract ? { contract } : {}) });
+    this.db.prepare("UPDATE trades SET state='settled',profit=?,audit_json=? WHERE id=?")
+      .run(profit, audit, id);
   }
   reject(id: string) { this.db.prepare("UPDATE trades SET state='rejected' WHERE id=?").run(id); }
   unresolved(account: string): Trade[] {
@@ -65,9 +103,12 @@ export class DemoStore {
       .all(account) as Trade[];
   }
   summary(account: string) {
-    const run = this.db.prepare('SELECT * FROM runs WHERE account=? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(account);
-    const trades = this.db.prepare(`SELECT id,run_id,signal_epoch,direction,stake,contract_id,state,profit,created_at
-      FROM trades WHERE account=? ORDER BY created_at DESC, rowid DESC LIMIT 100`).all(account);
+    const run = this.db.prepare(`SELECT *, CASE WHEN id IN (SELECT run_id FROM range_runs)
+      THEN 'RB100' ELSE '1HZ100V' END AS symbol FROM runs WHERE account=? ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(account);
+    const trades = this.db.prepare(`SELECT id,run_id,signal_epoch,direction,stake,contract_id,state,profit,created_at,audit_json,
+      CASE WHEN run_id IN (SELECT run_id FROM range_runs) THEN 'RB100' ELSE '1HZ100V' END AS symbol
+      FROM trades WHERE account=? ORDER BY created_at DESC, rowid DESC LIMIT 100`).all(account)
+      .map(({ audit_json, ...trade }) => ({ ...trade, audit: audit_json ? JSON.parse(String(audit_json)) : null }));
     return { run: run ?? null, trades, unresolved: this.unresolved(account).length };
   }
   totals(run: string) {

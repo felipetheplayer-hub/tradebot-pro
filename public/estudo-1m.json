@@ -1,0 +1,102 @@
+{
+  "symbol": "1HZ100V",
+  "start": "2026-08-26",
+  "split": "2026-10-21",
+  "end": "2026-11-18",
+  "pricing": "minute_opens",
+  "delay": 0,
+  "payout": 0.95,
+  "breakeven": 0.5128205128205129,
+  "periods": {
+    "inicial": {
+      "minutes_scored": 80639,
+      "calendar_minutes": 80640,
+      "rules": {
+        "dois_fechamentos": {
+          "signals": 80386,
+          "wins": 40183,
+          "losses": 40203,
+          "equal_prices": 234,
+          "accuracy": 0.4998756002288956,
+          "coverage": 0.9968625602996068,
+          "daily_interval": [
+            0.49639831299219944,
+            0.5033832528981541
+          ],
+          "net_per_100": -2.524257955365364
+        },
+        "rompimento_20": {
+          "signals": 12457,
+          "wins": 6310,
+          "losses": 6147,
+          "equal_prices": 31,
+          "accuracy": 0.5065425062214016,
+          "coverage": 0.15447860216520543,
+          "daily_interval": [
+            0.49809268728187645,
+            0.5146728672225785
+          ],
+          "net_per_100": -1.224211286826684
+        },
+        "rsi2_media200": {
+          "signals": 7468,
+          "wins": 3746,
+          "losses": 3722,
+          "equal_prices": 15,
+          "accuracy": 0.501606855918586,
+          "coverage": 0.09261027542504248,
+          "daily_interval": [
+            0.4913934426229508,
+            0.5118417386458624
+          ],
+          "net_per_100": -2.1866630958757387
+        }
+      }
+    },
+    "reservado": {
+      "minutes_scored": 40299,
+      "calendar_minutes": 40320,
+      "rules": {
+        "dois_fechamentos": {
+          "signals": 40206,
+          "wins": 20006,
+          "losses": 20200,
+          "equal_prices": 90,
+          "accuracy": 0.49758742476247325,
+          "coverage": 0.9976922504280503,
+          "daily_interval": [
+            0.49334593666824206,
+            0.5022014377751797
+          ],
+          "net_per_100": -2.970452171317712
+        },
+        "rompimento_20": {
+          "signals": 6133,
+          "wins": 3060,
+          "losses": 3073,
+          "equal_prices": 11,
+          "accuracy": 0.498940159791293,
+          "coverage": 0.15218739919104693,
+          "daily_interval": [
+            0.487012987012987,
+            0.5109099725230322
+          ],
+          "net_per_100": -2.706668840697864
+        },
+        "rsi2_media200": {
+          "signals": 3760,
+          "wins": 1868,
+          "losses": 1892,
+          "equal_prices": 10,
+          "accuracy": 0.4968085106382979,
+          "coverage": 0.09330256333904068,
+          "daily_interval": [
+            0.48194945848375453,
+            0.5134037367993501
+          ],
+          "net_per_100": -3.122340425531917
+        }
+      }
+    }
+  }
+}

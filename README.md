@@ -24,7 +24,8 @@ Após habilitar a versão nova, reconecte a conta demo: sessões antigas não co
 
 ## Execução demo
 
-- Instrumento fixo `1HZ100V`, contratos `CALL`/`PUT` de um minuto, sem martingale. O sinal compara dois fechamentos consecutivos de velas de um minuto. O bot aguarda a próxima vela após o início e só aceita sinais até dez segundos após o fechamento. Empates, lacunas e dados antigos não geram compra.
+- Estratégia padrão no `1HZ100V`, contratos `CALL`/`PUT` de um minuto, sem martingale. O sinal compara dois fechamentos consecutivos de velas de um minuto. O bot aguarda a próxima vela após o início e só aceita sinais até dez segundos após o fechamento. Empates, lacunas e dados antigos não geram compra.
+- O modo demo experimental de retorno ao limite escolhe o `RB100` no servidor. Alta exige fechamento exatamente na mínima das 60 velas anteriores e ao menos duas dessas velas com a mesma mínima. Baixa exige as condições simétricas na máxima. As 61 velas precisam ser fechadas e consecutivas. Cotação com pagamento total inferior a 1,90 vez o preço da entrada, pagamento ausente ou sinal com mais de cinco segundos bloqueiam a compra. O prazo se refere ao envio local. Preço de entrada, pagamento final e liquidação dependem da corretora. A simulação histórica antiga continua usando o Volatility 100.
 - A execução usa cotação e pagamento da Deriv, com entrada após o sinal e duração de um minuto a partir da compra. Não reproduz exatamente a entrada na abertura e o pagamento hipotético de 0,80 do simulador.
 - Uma execução por conta e um contrato por vez. Valor entre 0,35 e 10,00 na moeda da conta; perda líquida máxima até 50,00; de 1 a 20 operações; duração máxima de 20 minutos. Os padrões 1,00 / 3,00 / 3 operações são limites de teste. Mínimos de contrato dependem da Deriv; rejeições interrompem a execução.
 - Antes de comprar, verifica saldo e se perder o valor integral da próxima operação ultrapassaria a perda líquida máxima daquela execução. Iniciar novamente não reinicializa uma execução ativa. Parar impede novas compras e acompanha o contrato comprado até a liquidação. Logout/expiração podem interromper o acompanhamento; use Verificar pendências após reconectar.
@@ -33,7 +34,7 @@ Após habilitar a versão nova, reconecte a conta demo: sessões antigas não co
 - Verificar pendências é somente leitura: consulta contratos conhecidos e registra liquidações. Compras sem identificador exigem conferência do extrato Deriv e reconciliação administrativa; esta versão não apaga nem resolve a incerteza automaticamente.
 - O painel mostra até 100 registros recentes da conta autenticada. O saldo principal continua sendo o consultado no login. Credenciais e IDs brutos de conta não são persistidos; um hash estável separa as contas no banco.
 
-`POST /api/start`, `/api/stop` e `/api/reconcile` exigem sessão válida e Origin HTTPS exata. O navegador nunca envia parâmetros de contrato ou identificadores de conta. Cookies seguem `Secure`, `HttpOnly` e `SameSite=Lax`. Nenhuma rota aceita conta real, compra arbitrária ou mudança de instrumento.
+`POST /api/start`, `/api/stop` e `/api/reconcile` exigem sessão válida e Origin HTTPS exata. O navegador nunca envia parâmetros de contrato ou identificadores de conta. Cookies seguem `Secure`, `HttpOnly` e `SameSite=Lax`. Nenhuma rota aceita conta real, compra arbitrária ou símbolos fornecidos pelo navegador.
 
 ## Validação
 
